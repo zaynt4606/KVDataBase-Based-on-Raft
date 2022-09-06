@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,13 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+type SortedKey []KeyValue
+
+// Len 重写len,swap,less才能排序
+func (k SortedKey) Len() int           { return len(k) }
+func (k SortedKey) Swap(i, j int)      { k[i], k[j] = k[j], k[i] }
+func (k SortedKey) Less(i, j int) bool { return k[i].Key < k[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -88,6 +96,7 @@ func callDone(f *Task) Task {
 
 	args := f
 	reply := Task{}
+	// 这里有个Coordinator.MarkFinished
 	ok := call("Coordinator.MarkFinished", &args, &reply)
 
 	if ok {
@@ -115,7 +124,7 @@ func Worker(mapf func(string, string) []KeyValue,
 				DoMapTask(mapf, &task)
 				callDone(&task) // map完成
 			}
-		case WaittingTask:
+		case WaitingTask:
 			{
 				fmt.Println("All tasks are in progress, please wait...")
 				time.Sleep(time.Second)
@@ -149,6 +158,7 @@ func GetTask() Task {
 	return reply
 }
 
+// mapf传入的参数一个文件名，一个文件内容，返回一组kv结构体 []KeyValue, 也就是文件中所有单词作为key，1作为value
 func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 	var intermediate []KeyValue
 	filename := response.FileSlice[0]
@@ -159,7 +169,7 @@ func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 		// log.Fatalln("cannot open", filename)  // 等同于这一句
 	}
 	// 通过io工具包获取content,作为mapf的参数
-	content, err := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		log.Fatalf("cannot read %v", filename)
 	}
@@ -189,41 +199,58 @@ func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 		}
 		ofile.Close()
 	}
-
 }
 
+// reducef 传入的两个参数key，key对应的value切片组
 func DoReduceTask(reducef func(string, []string) string, response *Task) {
 	reduceFileNum := response.TaskId
-	intermediate := shuffle(response.FileSlice)
-	dir, _ := os.Getwd()
+	intermediate := shuffle(response.FileSlice) // []KeyValue
+	dir, _ := os.Getwd()                        // 得到相对路径位置
 	//tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
-	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	// 从go1.16开始，ioutil包已被声明废弃，应换用io包以及os包中的函数代替。
+	// tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
+	tempFile, err := os.CreateTemp(dir, "mr-tmp-*") // go 1.6之后用os，io替代ioutils包
 	if err != nil {
 		log.Fatal("Failed to create temp file", err)
 	}
 	i := 0
 	for i < len(intermediate) {
-		j := i + 1
+		// values存储所有相同的intermediate[i]的key对应的value
+		var values []string
+		values = append(values, intermediate[i].Value)
+		j := i + 1 // j的用处是用来帮i跳转到已经算过的key之后
 		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			values = append(values, intermediate[j].Value)
 			j++
 		}
-		var values []string
-		for k := i; k < j; k++ {
-			values = append(values, intermediate[k].Value)
-		}
-		output := reducef(intermediate[i].Key, values)
-		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
+		output := reducef(intermediate[i].Key, values)                // var reducef func(string, []string) string
+		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output) // 写到上面创建的文件中，这里的output已经合并过了
 		i = j
 	}
 	tempFile.Close()
 
-	// 在完全写入后进行重命名
+	// 在完全写入后进行重命名， Sprinf格式化字符串并赋给新值
 	fn := fmt.Sprintf("mr-out-%d", reduceFileNum)
 	os.Rename(tempFile.Name(), fn)
-
 }
 
+// 洗牌方法，得到一组排序好的kv数组
 func shuffle(files []string) []KeyValue {
-
-	return []KeyValue{}
+	// 将[]string 存储到 []KeyValue
+	var kva []KeyValue
+	for _, filepath := range files {
+		file, _ := os.Open(filepath)
+		dec := json.NewDecoder(file) // 解码器，读json
+		for {
+			var kv KeyValue
+			err := dec.Decode(&kv) // 解码并读到kv
+			if err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(SortedKey(kva)) // 这里对[]KeyValue排序
+	return kva
 }

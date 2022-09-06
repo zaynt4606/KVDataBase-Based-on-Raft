@@ -23,6 +23,7 @@ func main() {
 		os.Exit(1)
 	}
 	// 第二个参数是nReduce
+	// 第一个参数是file []string
 	m := mr.MakeCoordinator(os.Args[1:], 10)
 	for m.Done() == false {
 		time.Sleep(time.Second)

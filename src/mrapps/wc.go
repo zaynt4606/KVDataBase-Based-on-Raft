@@ -12,11 +12,11 @@ import "strings"
 import "strconv"
 
 //
-// The map function is called once for each file of input. The first
-// argument is the name of the input file, and the second is the
-// file's complete contents. You should ignore the input file name,
-// and look only at the contents argument. The return value is a slice
-// of key/value pairs.
+// The map function is called once for each file of input.
+// The first argument is the name of the input file
+// the second is the file's complete contents.
+// You should ignore the input file name,and look only at the contents argument.
+// The return value is a slice of key/value pairs.
 //
 func Map(filename string, contents string) []mr.KeyValue {
 	// function to detect word separators.
