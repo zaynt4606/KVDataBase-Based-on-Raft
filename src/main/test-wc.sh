@@ -5,6 +5,7 @@
 #
 
 # comment this out to run the tests without the Go race detector.
+# 好像除了省掉一个 - 也没有方便啥
 RACE=-race
 
 if [[ "$OSTYPE" = "darwin"* ]]
@@ -59,6 +60,7 @@ rm -f mr-*
 (cd .. && go build $RACE mrworker.go) || exit 1
 (cd .. && go build $RACE mrsequential.go) || exit 1
 
+# 统计失败的测试数目
 failed_any=0
 
 #########################################################
@@ -83,6 +85,7 @@ $TIMEOUT ../mrworker ../../mrapps/wc.so &
 $TIMEOUT ../mrworker ../../mrapps/wc.so &
 
 # wait for the coordinator to exit.
+# 只有全部任务都完成了coordinator才会退出
 wait $pid
 
 # since workers are required to exit when a job is completely finished,

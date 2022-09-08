@@ -2,7 +2,7 @@ package main
 
 //
 // simple sequential MapReduce.
-//
+// 单个的MapReduce实现样例
 // go run mrsequential.go wc.so pg*.txt
 //
 

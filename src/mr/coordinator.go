@@ -29,27 +29,283 @@ type Coordinator struct {
 	files             []string       // 传入的文件数组
 }
 
+// TaskMetaInfo 保存任务的元数据
+type TaskMetaInfo struct {
+	state     State     // 任务的状态
+	StartTime time.Time // 任务的开始时间，为crash做准备
+	TaskAdr   *Task     // 传入任务的指针,为的是这个任务从通道中取出来后，还能通过地址标记这个任务已经完成
+}
+
 // TaskMetaHolder 保存全部任务的元数据
 type TaskMetaHolder struct {
 	MetaMap map[int]*TaskMetaInfo // 通过下标hash快速定位
 }
 
-// TaskMetaInfo 保存任务的元数据
-type TaskMetaInfo struct {
-	state     State     // 任务的状态
-	StartTime time.Time // 任务开始的时间
-	TaskAdr   *Task     // 传入任务的指针,为的是这个任务从通道中取出来后，还能通过地址标记这个任务已经完成
+// 将接受taskMetaInfo储存进MetaHolder里
+func (t *TaskMetaHolder) acceptMeta(TaskInfo *TaskMetaInfo) bool {
+	taskId := TaskInfo.TaskAdr.TaskId
+	meta, _ := t.MetaMap[taskId]
+	// 没出错就是找到了对应的taskid，已经存在
+	if meta != nil {
+		//fmt.Println("meta contains task which id = ", taskId)
+		return false
+	} else {
+		t.MetaMap[taskId] = TaskInfo
+	}
+	return true
 }
 
-// //
-// // Your code here -- RPC handlers for the worker to call.
-// // an example RPC handler.
-// // the RPC argument and reply types are defined in rpc.go.
-// //
-// func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-// 	reply.Y = args.X + 1
-// 	return nil
-// }
+// 检查多少个任务做了包括（map、reduce）,
+func (t *TaskMetaHolder) checkTaskDone() bool {
+
+	var (
+		mapDoneNum      = 0
+		mapUnDoneNum    = 0
+		reduceDoneNum   = 0
+		reduceUnDoneNum = 0
+	)
+
+	// 遍历储存task信息的map
+	for _, v := range t.MetaMap {
+		// 首先判断任务的类型
+		if v.TaskAdr.TaskType == MapTask {
+			// 判断任务是否完成,下同
+			if v.state == Done {
+				mapDoneNum++
+			} else {
+				mapUnDoneNum++
+			}
+		} else if v.TaskAdr.TaskType == ReduceTask {
+			if v.state == Done {
+				reduceDoneNum++
+			} else {
+				reduceUnDoneNum++
+			}
+		}
+
+	}
+	//fmt.Printf("map tasks  are finished %d/%d, reduce task are finished %d/%d \n",
+	//	mapDoneNum, mapDoneNum+mapUnDoneNum, reduceDoneNum, reduceDoneNum+reduceUnDoneNum)
+
+	// 如果某一个map或者reduce全部做完了，代表需要切换下一阶段，返回true
+
+	// Map
+	if (mapDoneNum > 0 && mapUnDoneNum == 0) && (reduceDoneNum == 0 && reduceUnDoneNum == 0) {
+		return true
+	} else {
+		if reduceDoneNum > 0 && reduceUnDoneNum == 0 {
+			return true
+		}
+	}
+
+	return false
+
+}
+
+// 判断给定任务是否在工作，并修正其目前任务信息状态,如果任务不在工作的话返回true
+func (t *TaskMetaHolder) judgeState(taskId int) bool {
+	taskInfo, ok := t.MetaMap[taskId]
+	// 把在waiting状态的任务状态改为working状态
+	if !ok || taskInfo.state != Waiting {
+		return false
+	}
+	taskInfo.state = Working
+	taskInfo.StartTime = time.Now()
+	// 改为working状态和更新时间之后或者本来就是working状态就返回true
+	return true
+}
+
+//
+// create a Coordinator.
+// main/mrcoordinator.go calls this function.
+// nReduce is the number of reduce tasks to use.
+//
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	c := Coordinator{
+		files:             files,
+		ReducerNum:        nReduce,
+		DistPhase:         MapPhase,
+		MapTaskChannel:    make(chan *Task, len(files)),
+		ReduceTaskChannel: make(chan *Task, nReduce),
+		taskMetaHolder: TaskMetaHolder{
+			MetaMap: make(map[int]*TaskMetaInfo, len(files)+nReduce), // 任务的总数应该是files + Reducer的数量
+		},
+	}
+
+	// 定义结构体的成员函数？
+	c.makeMapTasks(files)
+
+	c.server()
+	// go关键字 表示并发执行
+	go c.CrashDetector()
+
+	return &c
+}
+
+func selectReduceName(reduceNum int) []string {
+	var s []string
+	path, _ := os.Getwd()
+	files, _ := os.ReadDir(path)
+	for _, fi := range files {
+		// 匹配对应的reduce文件,根据判断是否含有前缀和后缀数字
+		if strings.HasPrefix(fi.Name(), "mr-tmp") && strings.HasSuffix(fi.Name(), strconv.Itoa(reduceNum)) {
+			s = append(s, fi.Name())
+		}
+	}
+	return s
+}
+
+func (c *Coordinator) CrashDetector() {
+	for {
+		// 在至少规定的持续时间d内停止最新的go-routine
+		time.Sleep(time.Second * 2) //
+		mu.Lock()
+
+		// 已经全部完成直接退出
+		if c.DistPhase == AllDone {
+			mu.Unlock()
+			break
+		}
+
+		for _, v := range c.taskMetaHolder.MetaMap {
+			if v.state == Working {
+				//fmt.Println("task[", v.TaskAdr.TaskId, "] is working: ", time.Since(v.StartTime), "s")
+			}
+			// time.Now().Sub(v.StartTime) 的快捷表达
+			// task处于working状态大于9秒就判定为任务崩溃(文档要求10秒)
+			if v.state == Working && time.Since(v.StartTime) > 10*time.Second {
+				fmt.Printf("the task[ %d ] is crash,take [%d] s\n", v.TaskAdr.TaskId, time.Since(v.StartTime))
+				switch v.TaskAdr.TaskType {
+				// 对应的task加入相应的channel，并把状态改为waiting
+				case MapTask:
+					c.MapTaskChannel <- v.TaskAdr
+					v.state = Waiting
+				case ReduceTask:
+					c.ReduceTaskChannel <- v.TaskAdr
+					v.state = Waiting
+
+				}
+			}
+		}
+		mu.Unlock()
+	}
+}
+
+// 对map任务进行处理,初始化map任务
+func (c *Coordinator) makeMapTasks(files []string) {
+
+	for _, v := range files {
+		id := c.generateTaskId()
+		task := Task{
+			TaskType:   MapTask,
+			TaskId:     id,
+			ReducerNum: c.ReducerNum,
+			FileSlice:  []string{v},
+		}
+
+		// 保存任务的初始状态
+		taskMetaInfo := TaskMetaInfo{
+			state:   Waiting, // 任务等待被执行
+			TaskAdr: &task,   // 保存任务的地址
+		}
+		c.taskMetaHolder.acceptMeta(&taskMetaInfo)
+
+		//fmt.Println("make a map task :", &task)
+		c.MapTaskChannel <- &task
+	}
+}
+
+func (c *Coordinator) makeReduceTasks() {
+	for i := 0; i < c.ReducerNum; i++ {
+		id := c.generateTaskId()
+		task := Task{
+			TaskId:    id,
+			TaskType:  ReduceTask,
+			FileSlice: selectReduceName(i),
+		}
+
+		// 保存任务的初始状态
+		taskMetaInfo := TaskMetaInfo{
+			state:   Waiting, // 任务等待被执行
+			TaskAdr: &task,   // 保存任务的地址
+		}
+		c.taskMetaHolder.acceptMeta(&taskMetaInfo)
+
+		//fmt.Println("make a reduce task :", &task)
+		c.ReduceTaskChannel <- &task
+	}
+}
+
+// 分发任务
+func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
+	// 分发任务应该上锁，防止多个worker竞争，并用defer回退解锁
+	mu.Lock()
+	defer mu.Unlock()
+
+	// 判断任务类型存任务
+	switch c.DistPhase {
+	case MapPhase:
+		{
+			if len(c.MapTaskChannel) > 0 {
+				*reply = *<-c.MapTaskChannel
+				//fmt.Printf("poll-Map-taskid[ %d ]\n", reply.TaskId)
+				if !c.taskMetaHolder.judgeState(reply.TaskId) {
+					fmt.Printf("Map-taskid[ %d ] is running\n", reply.TaskId)
+				}
+			} else {
+				reply.TaskType = WaittingTask // 如果map任务被分发完了但是又没完成，此时就将任务设为Waitting
+				if c.taskMetaHolder.checkTaskDone() {
+					c.toNextPhase()
+				}
+				return nil
+			}
+		}
+
+	case ReducePhase:
+		{
+			if len(c.ReduceTaskChannel) > 0 {
+				*reply = *<-c.ReduceTaskChannel
+				//fmt.Printf("poll-Reduce-taskid[ %d ]\n", reply.TaskId)
+				if !c.taskMetaHolder.judgeState(reply.TaskId) {
+					fmt.Printf("Reduce-taskid[ %d ] is running\n", reply.TaskId)
+				}
+			} else {
+				reply.TaskType = WaittingTask // 如果map任务被分发完了但是又没完成，此时就将任务设为Waitting
+				if c.taskMetaHolder.checkTaskDone() {
+					c.toNextPhase()
+				}
+				return nil
+			}
+		}
+
+	case AllDone:
+		{
+
+			reply.TaskType = ExitTask
+		}
+	default:
+		panic("The phase undefined ! ! !")
+
+	}
+
+	return nil
+}
+
+func (c *Coordinator) toNextPhase() {
+	if c.DistPhase == MapPhase {
+		c.makeReduceTasks()
+		c.DistPhase = ReducePhase
+	} else if c.DistPhase == ReducePhase {
+		c.DistPhase = AllDone
+	}
+}
+
+// 通过结构体的TaskId自增来获取唯一的任务id
+func (c *Coordinator) generateTaskId() int {
+	res := c.TaskId
+	c.TaskId++
+	return res
+}
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -67,273 +323,7 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
-//
-func (c *Coordinator) Done() bool {
-	// Your code here.
-	mu.Lock()
-	defer mu.Unlock()
-	if c.DistPhase == AllDone { // 已经全部完成
-		fmt.Println("all task hava finished! the coordinator will exit!")
-		return true
-	}
-	return false
-}
-
-//
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
-//
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	// 初始化一个Coordinator
-	c := Coordinator{
-		ReducerNum:        nReduce,
-		files:             files,
-		DistPhase:         MapPhase,
-		ReduceTaskChannel: make(chan *Task, nReduce), // chan是关键字定义channel
-		MapTaskChannel:    make(chan *Task, len(files)),
-		taskMetaHolder: TaskMetaHolder{
-			MetaMap: make(map[int]*TaskMetaInfo, len(files)+nReduce),
-		},
-	}
-	c.server()
-	return &c
-}
-
-// TaskMetaHolder的几个成员函数
-// ---------------------------------------------------------------------------
-// 补充几个TaskMetaHolder的成员函数
-// 检查并接受一个TaskMetaInfo到TaskMetaHolder
-func (t *TaskMetaHolder) acceptMeta(TaskInfo *TaskMetaInfo) bool {
-	tid := TaskInfo.TaskAdr.TaskId
-	_, err := t.MetaMap[tid]
-	if !err {
-		return false
-	} else {
-		t.MetaMap[tid] = TaskInfo
-	}
-	return true
-}
-
-// 统计多少任务完成，是否有还在工作的map或者reduce
-func (t *TaskMetaHolder) checkTaskDone() bool {
-	var (
-		mapDoneNum      = 0
-		mapUnDoneNum    = 0
-		reduceDoneNum   = 0
-		reduceUnDoneNum = 0
-	)
-
-	for _, v := range t.MetaMap {
-		if v.TaskAdr.TaskType == MapTask {
-			if v.state == Done {
-				mapDoneNum++
-			} else {
-				mapUnDoneNum++
-			}
-		} else if v.TaskAdr.TaskType == ReduceTask {
-			if v.state == Done {
-				reduceDoneNum++
-			} else {
-				reduceUnDoneNum++
-			}
-		}
-	}
-	// map和reduce都完成了或者只有reduce完成了
-	if (mapDoneNum > 0 && mapUnDoneNum == 0) && (reduceDoneNum > 0 && reduceUnDoneNum == 0) {
-		return true
-	} else if reduceDoneNum > 0 && reduceUnDoneNum == 0 {
-		return true
-	}
-	return false
-}
-
-// 将在waiting状态的任务改成working，判断并修改成功返回true
-func (t *TaskMetaHolder) judgeState(taskId int) bool {
-	taskinfo, err := t.MetaMap[taskId]
-	// 正在Working或者已经Done就直接返回false
-	// err发生错误时为false
-	if !err || taskinfo.state != Waiting {
-		return false
-	}
-	taskinfo.state = Working
-	taskinfo.StartTime = time.Now()
-	return true
-}
-
-//
-// 一些Coordinate的成员函数
-// -----------------------------------------------------------------------
-// worker崩溃检测
-func (c *Coordinator) CrashDectector() {
-	for {
-		// 先暂停工作并上锁
-		time.Sleep(2 * time.Second)
-		mu.Lock()
-
-		// 跳出循环条件，任务全部完成
-		if c.DistPhase == AllDone {
-			mu.Unlock()
-			break
-		}
-
-		for _, v := range c.taskMetaHolder.MetaMap {
-			// lab说明 10s 没有结束woker可以看作崩溃
-			if v.state == Working && time.Now().Sub(v.StartTime) > 10*time.Second {
-				// 打印一下崩溃信息
-				fmt.Printf("the task[ %d ] is crash,take [%d] s\n", v.TaskAdr.TaskId, time.Since(v.StartTime))
-				switch v.TaskAdr.TaskType {
-				case MapTask:
-					c.MapTaskChannel <- v.TaskAdr
-					v.state = Waiting
-				case ReduceTask:
-					c.ReduceTaskChannel <- v.TaskAdr
-					v.state = Waiting
-				}
-			}
-		}
-		mu.Unlock()
-	}
-}
-
-//
-// 分配一个map任务
-//
-func (c *Coordinator) makeMapTasks(files []string) {
-	for _, v := range files {
-		c.TaskId++
-		id := c.TaskId
-		task := Task{
-			TaskType:   MapTask,
-			TaskId:     id,
-			ReducerNum: c.ReducerNum,
-			FileSlice:  []string{v}, // 这里的FileSlice需要的是文件的切片
-		}
-		taskMetaInfo := TaskMetaInfo{
-			// 这里的time不赋值，因为还没有开始working
-			state:   Waiting,
-			TaskAdr: &task, // 要引用，因为会对task进行修改，不能拷贝
-		}
-
-		c.taskMetaHolder.acceptMeta(&taskMetaInfo) // 同样要引用，会修改
-		c.MapTaskChannel <- &task                  // Waitng状态的要加入channel
-	}
-}
-
-// 找到同文件目录下的所有map临时文件以mr-tmp开头
-// 返回文件名的[]string
-// 分配reduce任务用来创建reduce要处理的task，makeReduceTask
-func selectReduceName(reduceNum int) []string {
-	path, _ := os.Getwd()
-	files, _ := os.ReadDir(path)
-	var s []string
-	for _, file := range files {
-		if strings.HasPrefix(file.Name(), "mr-tmp") &&
-			strings.HasSuffix(file.Name(), strconv.Itoa(reduceNum)) {
-			s = append(s, file.Name())
-		}
-	}
-	return s
-}
-
-//
-// 分配一个reduce任务
-//
-func (c *Coordinator) makeReduceTasks() {
-	for i := 0; i < c.ReducerNum; i++ {
-		c.TaskId++
-		id := c.TaskId
-		task := Task{
-			TaskType:  ReduceTask,
-			TaskId:    id,                  // 一样整一个新的
-			FileSlice: selectReduceName(i), // 这里的FileSlice需要的是文件的切片
-		}
-		taskMetaInfo := TaskMetaInfo{
-			// 这里的time不赋值，因为还没有开始working
-			state:   Waiting,
-			TaskAdr: &task, // 要引用，因为会对task进行修改，不能拷贝
-		}
-
-		c.taskMetaHolder.acceptMeta(&taskMetaInfo) // 同样要引用，会修改
-		c.MapTaskChannel <- &task                  // Waitng状态的要加入channel
-	}
-}
-
-//
-// 在分发任务阶段使用，满足了checkTaskDone
-// 就可以让Coodinator进入下一个阶段
-//
-func (c *Coordinator) toNextPhase() {
-	if c.DistPhase == MapPhase {
-		c.makeReduceTasks()
-		c.DistPhase = ReducePhase
-	} else if c.DistPhase == ReducePhase {
-		c.DistPhase = AllDone
-	}
-}
-
-//
-// 分发任务
-//
-func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	switch c.DistPhase {
-	// map阶段的
-	case MapPhase:
-		{
-			if len(c.MapTaskChannel) > 0 {
-				*reply = *<-c.MapTaskChannel // chan是一个一个的传递的
-				// 修改状态，waiting就跳过，working表示正在working，出现问题
-				if !c.taskMetaHolder.judgeState(reply.TaskId) {
-					fmt.Printf("Map-taskid[ %d ] is running\n", reply.TaskId)
-				}
-
-			} else { // map已经分发完了但是没有完成
-				reply.TaskType = WaitingTask
-				if c.taskMetaHolder.checkTaskDone() {
-					c.toNextPhase()
-				}
-				return nil
-			}
-		}
-
-	case ReducePhase:
-		{
-			if len(c.ReduceTaskChannel) > 0 {
-				*reply = *<-c.ReduceTaskChannel // chan是一个一个的传递的
-				// 修改状态，waiting就跳过，working表示正在working，出现问题
-				if !c.taskMetaHolder.judgeState(reply.TaskId) {
-					fmt.Printf("Reduce-taskid[ %d ] is running\n", reply.TaskId)
-				}
-			} else { // 分发完还没结束就改状态在waiting
-				reply.TaskType = WaitingTask
-				if c.taskMetaHolder.checkTaskDone() {
-					c.toNextPhase()
-				}
-				return nil
-			}
-
-		}
-
-	case AllDone:
-		{
-			reply.TaskType = ExitTask
-		}
-
-	default:
-		fmt.Println("cannot find the phase!")
-	}
-	return nil
-}
-
-//
-// 在worker中会作为call的参数函数被调用，检查有没有什么错误并返回
-//
+// 类似下面的Example的功能， 将任务标记为完成，其实只用到了args
 func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 	mu.Lock()
 	defer mu.Unlock()
@@ -348,7 +338,7 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		} else {
 			fmt.Printf("Map task Id[%d] is finished,already ! ! !\n", args.TaskId)
 		}
-
+		break
 	case ReduceTask:
 		meta, ok := c.taskMetaHolder.MetaMap[args.TaskId]
 
@@ -359,10 +349,39 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		} else {
 			fmt.Printf("Reduce task Id[%d] is finished,already ! ! !\n", args.TaskId)
 		}
+		break
 
 	default:
 		panic("The task type undefined ! ! !")
 	}
 	return nil
 
+}
+
+//Done 主函数mr调用，如果所有task完成mr会通过此方法退出
+func (c *Coordinator) Done() bool {
+	mu.Lock()
+	defer mu.Unlock()
+	if c.DistPhase == AllDone {
+		fmt.Println("All tasks are finished,the coordinator will be exit! !")
+		return true
+	} else {
+		return false
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Your code here -- RPC handlers for the worker to call.
+// worker中的CallExample()要调用此函数，
+// an example RPC handler.
+//
+// the RPC argument and reply types are defined in rpc.go.
+//
+func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
+	newReply := ExampleReply{
+		1000,
+	}
+	reply = &newReply
+	fmt.Println("example")
+	return nil
 }
