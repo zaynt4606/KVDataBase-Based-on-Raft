@@ -22,17 +22,17 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
-	defer cfg.cleanup()
+	defer cfg.cleanup() // 最后用完全部kill掉
 
 	cfg.begin("Test (2A): initial election")
 
-	// is a leader elected?
+	// is a leader elected? 确认是不是只有一个server认为自己是leader
 	cfg.checkOneLeader()
 
 	// sleep a bit to avoid racing with followers learning of the
 	// election, then check that all peers agree on the term.
 	time.Sleep(50 * time.Millisecond)
-	term1 := cfg.checkTerms()
+	term1 := cfg.checkTerms() // 所有的raft的term都是一致的，并且返回其term值
 	if term1 < 1 {
 		t.Fatalf("term is %v, but should be at least 1", term1)
 	}
@@ -41,7 +41,10 @@ func TestInitialElection2A(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
-		fmt.Printf("warning: term changed even though there were no failures")
+		fmt.Println("term1 = ", term1)
+		fmt.Println("term2 = ", term2)
+		// 只有2A的话可能因为没有实现leader定期发送heartbeat会出现这种情况
+		fmt.Println("warning: term changed even though there were no failures")
 	}
 
 	// there should still be a leader.

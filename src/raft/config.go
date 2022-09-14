@@ -8,20 +8,24 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
-import "6.824/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"6.824/labgob"
+	"6.824/labrpc"
+
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+	"time"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -97,7 +101,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 		cfg.start1(i, applier)
 	}
 
-	// connect everyone
+	// connect everyone, 一个个连接到net中
 	for i := 0; i < cfg.n; i++ {
 		cfg.connect(i)
 	}
@@ -370,11 +374,11 @@ func (cfg *config) connect(i int) {
 		}
 	}
 
-	// incoming ClientEnds
+	// incoming ClientEnds，双向
 	for j := 0; j < cfg.n; j++ {
 		if cfg.connected[j] {
 			endname := cfg.endnames[j][i]
-			cfg.net.Enable(endname, true)
+			cfg.net.Enable(endname, true) // Network.enabled[endname]
 		}
 	}
 }
@@ -430,13 +434,15 @@ func (cfg *config) setlongreordering(longrel bool) {
 // try a few times in case re-elections are needed.
 //
 func (cfg *config) checkOneLeader() int {
-	for iters := 0; iters < 10; iters++ {
+	for iters := 0; iters < 10; iters++ { // 试十次
+		// 随机sleep一个时间 450-550 ms内
 		ms := 450 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
 		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
+				// 这个server是不是认为自己是leader
 				if term, leader := cfg.rafts[i].GetState(); leader {
 					leaders[term] = append(leaders[term], i)
 				}
@@ -465,7 +471,7 @@ func (cfg *config) checkOneLeader() int {
 func (cfg *config) checkTerms() int {
 	term := -1
 	for i := 0; i < cfg.n; i++ {
-		if cfg.connected[i] {
+		if cfg.connected[i] { // server没掉线
 			xterm, _ := cfg.rafts[i].GetState()
 			if term == -1 {
 				term = xterm
