@@ -508,6 +508,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 		}
 
 		cfg.mu.Lock()
+		// 提交了就在logs中，读取所有server的log中的第index个log，统计总数目
 		cmd1, ok := cfg.logs[i][index]
 		cfg.mu.Unlock()
 
@@ -581,6 +582,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
+				// 遍历找到leader和它的index
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
@@ -594,6 +596,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
+				//有nd个server认为提交了新的log entry
 				nd, cmd1 := cfg.nCommitted(index)
 				if nd > 0 && nd >= expectedServers {
 					// committed
@@ -611,7 +614,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	if cfg.checkFinished() == false {
+	if cfg.checkFinished() == false { // debug，程序正常不会运行到这里
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 	}
 	return -1

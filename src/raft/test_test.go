@@ -8,18 +8,21 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
 const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
+	// 测试最开始的leader状态，只能存在一个leader，并且所有server对此是共识
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup() // 最后用完全部kill掉
@@ -39,11 +42,13 @@ func TestInitialElection2A(t *testing.T) {
 
 	// does the leader+term stay the same if there is no network failure?
 	time.Sleep(2 * RaftElectionTimeout)
+	// time.Sleep(50 * time.Millisecond)
 	term2 := cfg.checkTerms()
 	if term1 != term2 {
 		fmt.Println("term1 = ", term1)
 		fmt.Println("term2 = ", term2)
-		// 只有2A的话可能因为没有实现leader定期发送heartbeat会出现这种情况
+		// 只做了2A的话可能因为没有实现leader定期发送heartbeat会出现这种情况
+		// 完成了
 		fmt.Println("warning: term changed even though there were no failures")
 	}
 
@@ -54,6 +59,7 @@ func TestInitialElection2A(t *testing.T) {
 }
 
 func TestReElection2A(t *testing.T) {
+	// 通过下线server再上线server来测试raft的select 机制
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -74,6 +80,7 @@ func TestReElection2A(t *testing.T) {
 
 	// if there's no quorum, no new leader should
 	// be elected.
+	// 掉线了两个，一共三个，选不出leader
 	cfg.disconnect(leader2)
 	cfg.disconnect((leader2 + 1) % servers)
 	time.Sleep(2 * RaftElectionTimeout)
@@ -83,10 +90,12 @@ func TestReElection2A(t *testing.T) {
 	cfg.checkNoLeader()
 
 	// if a quorum arises, it should elect a leader.
+	// 再上线一个server，人数够，能选出来了
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
+	// 上线最后一个，不能妨碍已经存在的leader
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
 
@@ -94,6 +103,7 @@ func TestReElection2A(t *testing.T) {
 }
 
 func TestManyElections2A(t *testing.T) {
+	// 多个server同时掉线并开始选举来测试并发选举
 	servers := 7
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -139,7 +149,7 @@ func TestBasicAgree2B(t *testing.T) {
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
-
+		// one方法中才开始调用start
 		xindex := cfg.one(index*100, servers, false)
 		if xindex != index {
 			t.Fatalf("got index %v but expected %v", xindex, index)
