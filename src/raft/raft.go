@@ -20,6 +20,8 @@ package raft
 import (
 	//	"bytes"
 	"bytes"
+	"fmt"
+
 	// "fmt"
 	"sync"
 	"time"
@@ -105,7 +107,8 @@ type Raft struct {
 	applyCh     chan ApplyMsg // chan中是所有可提交的日志，也就是server保存这条日志的数量过半
 	log         []Entry       // 日志条目数组
 	commitIndex int           // 先apply进chan中，然后更新commitIndex，也就是chan中最新的一个的index
-	lastApplied int
+	lastApplied int           // index of highest log entry applied to state machine
+	// (initialized to 0, increases monotonically)
 
 	// for leader, Reinitialized after election
 	// nextIndex -index of the next log entry to send to, initialized to leader last log index + 1)
@@ -201,7 +204,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
-	// initialize from state persisted before a crash
+	// initialize from state persisted before a crash,读取之前persist的成员
 	rf.readPersist(persister.ReadRaftState())
 
 	if rf.lastIncludedIndex > 0 {
@@ -213,6 +216,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// go rf.ticker()
 	go rf.electionTicker()
 	go rf.appendTicker()
+	go rf.committedTicker() // 更新chan的单独的gorouting
 
 	return rf
 }
@@ -244,6 +248,36 @@ func (rf *Raft) appendTicker() {
 			rf.leaderAppendEntries()
 		} else {
 			rf.mu.Unlock()
+		}
+	}
+}
+
+func (rf *Raft) committedTicker() {
+	for rf.killed() == false {
+		time.Sleep(AppliedSleep * time.Millisecond)
+		rf.mu.Lock()
+		// 已经更新过applied
+		if rf.lastApplied >= rf.commitIndex {
+			rf.mu.Unlock()
+			continue
+		}
+
+		// 存储没有更新的一直到需要更新的ApplyMsg，最后一起加入到chan中
+		messages := []ApplyMsg{}
+		for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.realLastIndex() {
+			// 一直到commitIndex，但不能超过最后一个，因为不是每个server都存了commitIndex
+			rf.lastApplied++
+			messages = append(messages, ApplyMsg{
+				CommandValid: true,
+				Command:      rf.indexToEntry(rf.lastApplied).Data,
+				CommandIndex: rf.lastApplied,
+				// SnapshotValid: false,
+			})
+		}
+		rf.mu.Unlock()
+		// 加入到chan中，提前解锁
+		for _, message := range messages {
+			rf.applyCh <- message
 		}
 	}
 }
@@ -575,9 +609,9 @@ func (rf *Raft) persist() {
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.votedFor)
-	// e.Encode(rf.logs)
-	// e.Encode(rf.lastIncludeIndex)
-	// e.Encode(rf.lastIncludeTerm)
+	e.Encode(rf.log)
+	e.Encode(rf.lastIncludedIndex)
+	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
 }
@@ -591,17 +625,26 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []Entry
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil ||
+		d.Decode(&lastIncludedIndex) != nil ||
+		d.Decode(&lastIncludedTerm) != nil {
+		fmt.Println("decode error!")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+		rf.lastIncludedIndex = lastIncludedIndex
+		rf.lastIncludedTerm = lastIncludedTerm
+	}
 }
 
 //
