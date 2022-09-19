@@ -46,7 +46,7 @@ type config struct {
 	t           *testing.T
 	finished    int32
 	net         *labrpc.Network
-	n           int
+	n           int // raft数量
 	rafts       []*Raft
 	applyErr    []string // from apply channel readers
 	connected   []bool   // whether each server is on the net
@@ -110,6 +110,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 }
 
 // shut down a Raft server but save its persistent state.
+// 和start1不一样，只是shut down和保存persistent，不重新复制一个
 func (cfg *config) crash1(i int) {
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
@@ -183,7 +184,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 	}
 }
 
-// returns "" or error string
+// returns "" or error string，获取snap
 func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	if snapshot == nil {
 		log.Fatalf("nil snapshot")
@@ -277,6 +278,9 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
 // this server. since we cannot really kill it.
+// 启动或重新启动 Raft。 如果已经存在，先“杀死”它。
+// 分配新的传出端口文件名和新的状态持久化器，以隔离此服务器的先前实例。
+// 因为我们不能真正杀死它。
 //
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
@@ -292,7 +296,7 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	ends := make([]*labrpc.ClientEnd, cfg.n)
 	for j := 0; j < cfg.n; j++ {
 		ends[j] = cfg.net.MakeEnd(cfg.endnames[i][j])
-		cfg.net.Connect(cfg.endnames[i][j], j)
+		cfg.net.Connect(cfg.endnames[i][j], j) // connect a ClientEnd to a server.
 	}
 
 	cfg.mu.Lock()
@@ -304,18 +308,18 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	// but copy old persister's content so that we always
 	// pass Make() the last persisted state.
 	if cfg.saved[i] != nil {
-		cfg.saved[i] = cfg.saved[i].Copy()
+		cfg.saved[i] = cfg.saved[i].Copy() // copy这个old persister
 
-		snapshot := cfg.saved[i].ReadSnapshot()
+		snapshot := cfg.saved[i].ReadSnapshot() // 读取保存的snapshot
 		if snapshot != nil && len(snapshot) > 0 {
 			// mimic KV server and process snapshot now.
 			// ideally Raft should send it up on applyCh...
-			err := cfg.ingestSnap(i, snapshot, -1)
+			err := cfg.ingestSnap(i, snapshot, -1) // 获取snap到cfg
 			if err != "" {
 				cfg.t.Fatal(err)
 			}
 		}
-	} else {
+	} else { // 本来就是空就建一个空的
 		cfg.saved[i] = MakePersister()
 	}
 
@@ -570,6 +574,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
+	// 最多循环10秒，超时说明有问题就跳出循环
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -582,18 +587,19 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			cfg.mu.Unlock()
 			if rf != nil {
-				// 遍历找到leader和它的index
+				// 遍历找到leader和它的index，这里start，client传入一个新的Entry得到新的index
 				index1, _, ok := rf.Start(cmd)
-				if ok {
+				if ok { // 是leader
 					index = index1
 					break
 				}
 			}
 		}
-
+		// 找到了leader
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
+			// 这个循环2s，等待2s没有结果说明没有areement
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				//有nd个server认为提交了新的log entry
@@ -607,10 +613,12 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
+			// 这里不重复了，直接报错退出
+			// 如果是true，短暂sleep一段时间后就进入最外层的for重新走一边循环
 			if retry == false {
 				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
 			}
-		} else {
+		} else { // 没有找到leader就等待一会儿然后循环找
 			time.Sleep(50 * time.Millisecond)
 		}
 	}

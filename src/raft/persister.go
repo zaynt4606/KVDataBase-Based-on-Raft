@@ -21,12 +21,14 @@ func MakePersister() *Persister {
 	return &Persister{}
 }
 
+// 要save的参数形式就是[]byte
 func clone(orig []byte) []byte {
 	x := make([]byte, len(orig))
 	copy(x, orig)
 	return x
 }
 
+// copy一个相同的Persist struct
 func (ps *Persister) Copy() *Persister {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -36,18 +38,21 @@ func (ps *Persister) Copy() *Persister {
 	return np
 }
 
+// Persist的方法，sava传入的state数据
 func (ps *Persister) SaveRaftState(state []byte) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ps.raftstate = clone(state)
 }
 
+// 读取对应persister的state数据
 func (ps *Persister) ReadRaftState() []byte {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	return clone(ps.raftstate)
 }
 
+// persister保存的state数据的长度，[]byte
 func (ps *Persister) RaftStateSize() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()

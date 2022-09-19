@@ -166,5 +166,4 @@ func (rf *Raft) realPreLog(server int) (int, int) {
 		entryIndex = lastIndex
 	}
 	return entryIndex, rf.indexToTerm(entryIndex)
-
 }

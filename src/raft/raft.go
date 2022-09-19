@@ -223,6 +223,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 // ----------------------------------------ticker----------------------------------------------------
 // The ticker go routine starts a new election if this peer hasn't received heartsbeats recently.
+// 2A
 func (rf *Raft) electionTicker() {
 	for rf.killed() == false {
 		nowTime := time.Now()
@@ -239,6 +240,7 @@ func (rf *Raft) electionTicker() {
 }
 
 // leader 定时发送更新heartbeat，其他surver接收并且更新日志
+// 2A 2B heartbeat，添加日志
 func (rf *Raft) appendTicker() {
 	for rf.killed() == false {
 		time.Sleep(HeartbeatSleep * time.Millisecond)
@@ -252,6 +254,7 @@ func (rf *Raft) appendTicker() {
 	}
 }
 
+// 2B, goroutin不断检查是否可以发起新的提交
 func (rf *Raft) committedTicker() {
 	for rf.killed() == false {
 		time.Sleep(AppliedSleep * time.Millisecond)
@@ -425,10 +428,10 @@ func (rf *Raft) leaderAppendEntries() {
 		// 每个server开启协程
 		go func(server int) {
 			rf.mu.Lock()
-			if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
-				rf.mu.Unlock()
-				return
-			}
+			// if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
+			// 	rf.mu.Unlock()
+			// 	return
+			// }
 			// ------------------------定义发送的RPC部分-------------------------------------
 			// 填充一个要发送的Entryargs
 			prevLogIndex, prevLogTerm := rf.realPreLog(server)
@@ -590,11 +593,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 }
 
-// -----------------------------------------------------------------------------------
+// ---------------------------------------2C-Persist部分--------------------------------------------
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
+// 每一次涉及到persist的内容就需要save一下
+// 将states编码为字节数组，然后传给persister方便存储
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
@@ -639,14 +644,17 @@ func (rf *Raft) readPersist(data []byte) {
 		d.Decode(&lastIncludedTerm) != nil {
 		fmt.Println("decode error!")
 	} else {
+		// 论文中要求的3个persistent
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.log = log
+		// snapshot需要的两个参数
 		rf.lastIncludedIndex = lastIncludedIndex
 		rf.lastIncludedTerm = lastIncludedTerm
 	}
 }
 
+// ---------------------------------------------2D-snapshot日志收缩-----------------------------------------------------
 //
 // A service wants to switch to snapshot.  Only do so if Raft hasn't
 // have more recent info since it communicate the snapshot on applyCh.
@@ -699,6 +707,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true                // 自己是leader
 
 	// 加入新的entry到leader的log中
+	// 这里加入新的Entry，那上面的index其实指的就是这个Entry，也就是新加入的Entry的index
 	rf.log = append(rf.log, Entry{Term: term, Index: index, Data: command})
 	rf.persist()
 

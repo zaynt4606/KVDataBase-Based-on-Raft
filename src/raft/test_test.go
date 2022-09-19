@@ -145,13 +145,14 @@ func TestBasicAgree2B(t *testing.T) {
 
 	iters := 3
 	for index := 1; index < iters+1; index++ {
+		// 还没有start，应该检测不到新的index
 		nd, _ := cfg.nCommitted(index)
 		if nd > 0 {
 			t.Fatalf("some have committed before Start()")
 		}
 		// one方法中才开始调用start
 		xindex := cfg.one(index*100, servers, false)
-		if xindex != index {
+		if xindex != index { // 得到的index和期望的不符合
 			t.Fatalf("got index %v but expected %v", xindex, index)
 		}
 	}
@@ -169,12 +170,13 @@ func TestRPCBytes2B(t *testing.T) {
 	defer cfg.cleanup()
 
 	cfg.begin("Test (2B): RPC byte count")
-
-	cfg.one(99, servers, false)
-	bytes0 := cfg.bytesTotal()
+	// 一开始是填充了一个log，所以这里的新log的index是1
+	cfg.one(99, servers, false) // start一次，
+	bytes0 := cfg.bytesTotal()  // 发送的总共的bytes
 
 	iters := 10
-	var sent int64 = 0
+	var sent int64 = 0 // 统计发送的总共的字符数
+	// 前面发送了一次，index从2开始了
 	for index := 2; index < iters+2; index++ {
 		cmd := randstring(5000)
 		xindex := cfg.one(cmd, servers, false)
@@ -185,9 +187,9 @@ func TestRPCBytes2B(t *testing.T) {
 	}
 
 	bytes1 := cfg.bytesTotal()
-	got := bytes1 - bytes0
-	expected := int64(servers) * sent
-	if got > expected+50000 {
+	got := bytes1 - bytes0            // 两次bytes之差
+	expected := int64(servers) * sent // sent的字符*servers数量
+	if got > expected+50000 {         // 实际bytes差大于预计发送的总字符数
 		t.Fatalf("too many RPC bytes; got %v, expected %v", got, expected)
 	}
 
@@ -204,7 +206,7 @@ func For2023TestFollowerFailure2B(t *testing.T) {
 
 	cfg.begin("Test (2B): test progressive failure of followers")
 
-	cfg.one(101, servers, false)
+	cfg.one(101, servers, false) // start一次 ，index = 1
 
 	// disconnect one follower from the network.
 	leader1 := cfg.checkOneLeader()
@@ -212,17 +214,17 @@ func For2023TestFollowerFailure2B(t *testing.T) {
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
-	cfg.one(102, servers-1, false)
+	cfg.one(102, servers-1, false) // 再start一次， index = 2
 	time.Sleep(RaftElectionTimeout)
-	cfg.one(103, servers-1, false)
-
+	cfg.one(103, servers-1, false) // 掉线一个server后start两次， index = 3
+	// 这俩index都能提交，有一个leader一个server在线，大于定义时候的3个
 	// disconnect the remaining follower
-	leader2 := cfg.checkOneLeader()
-	cfg.disconnect((leader2 + 1) % servers)
+	leader2 := cfg.checkOneLeader()         // 检查是否还是一个leader
+	cfg.disconnect((leader2 + 1) % servers) // 掉线两个，不包括leader，包括已经掉线的那个
 	cfg.disconnect((leader2 + 2) % servers)
 
 	// submit a command.
-	index, _, ok := cfg.rafts[leader2].Start(104)
+	index, _, ok := cfg.rafts[leader2].Start(104) // expected index = 4
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
@@ -233,6 +235,7 @@ func For2023TestFollowerFailure2B(t *testing.T) {
 	time.Sleep(2 * RaftElectionTimeout)
 
 	// check that command 104 did not commit.
+	// 这个command只有leader一个人，只有一个在线的leader，不能提交
 	n, _ := cfg.nCommitted(index)
 	if n > 0 {
 		t.Fatalf("%v committed but no majority", n)
@@ -251,28 +254,28 @@ func For2023TestLeaderFailure2B(t *testing.T) {
 
 	cfg.begin("Test (2B): test failure of leaders")
 
-	cfg.one(101, servers, false)
+	cfg.one(101, servers, false) // start一次，index = 1
 
-	// disconnect the first leader.
+	// disconnect the first leader. 掉线一个leader
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
-	// the remaining followers should elect
-	// a new leader.
-	cfg.one(102, servers-1, false)
+	// the remaining followers should elect a new leader.
+	cfg.one(102, servers-1, false) // 再start一次，index = 2
 	time.Sleep(RaftElectionTimeout)
-	cfg.one(103, servers-1, false)
+	cfg.one(103, servers-1, false) // 再start一次，index = 3
 
-	// disconnect the new leader.
+	// disconnect the new leader. 掉线新leader
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 
 	// submit a command to each server.
+	// 也就是剩下的那个start一次，剩下的这个肯定不能选举为leader，所以要这样start
 	for i := 0; i < servers; i++ {
 		cfg.rafts[i].Start(104)
 	}
 
-	time.Sleep(2 * RaftElectionTimeout)
+	time.Sleep(2 * RaftElectionTimeout) // 选举时间也不能选举
 
 	// check that command 104 did not commit.
 	n, _ := cfg.nCommitted(4)
@@ -294,30 +297,29 @@ func TestFailAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): agreement after follower reconnects")
 
-	cfg.one(101, servers, false)
+	cfg.one(101, servers, false) // start一次 index = 1
 
-	// disconnect one follower from the network.
+	// disconnect one follower from the network.下线一个follower
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
 
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
-	cfg.one(102, servers-1, false)
-	cfg.one(103, servers-1, false)
+	cfg.one(102, servers-1, false) // start一次，index = 2
+	cfg.one(103, servers-1, false) // start一次，index = 3
 	time.Sleep(RaftElectionTimeout)
-	cfg.one(104, servers-1, false)
-	cfg.one(105, servers-1, false)
+	cfg.one(104, servers-1, false) // start一次，index = 4
+	cfg.one(105, servers-1, false) // start一次，index = 5
 
 	// re-connect
-	cfg.connect((leader + 1) % servers)
+	cfg.connect((leader + 1) % servers) // 下线的follower重新上线
 
 	// the full set of servers should preserve
-	// previous agreements, and be able to agree
-	// on new commands.
-	cfg.one(106, servers, true)
+	// previous agreements, and be able to agree on new commands.
+	cfg.one(106, servers, true) // 重复start，直到新上线的server可以agree新的command，index = 6
 	time.Sleep(RaftElectionTimeout)
-	cfg.one(107, servers, true)
-
+	cfg.one(107, servers, true) // 再重复start，index = 7
+	// 这个重复start的过程中不会报错，10s内成功就不会报错，不然会超时未完成报错
 	cfg.end()
 }
 
@@ -328,15 +330,15 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	cfg.begin("Test (2B): no agreement if too many followers disconnect")
 
-	cfg.one(10, servers, false)
+	cfg.one(10, servers, false) // start一次，index = 1
 
-	// 3 of 5 followers disconnect
+	// 3 of 5 followers disconnect，下线3个server，一共5个，再上线前start不会成功
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
 
-	index, _, ok := cfg.rafts[leader].Start(20)
+	index, _, ok := cfg.rafts[leader].Start(20) // 可以start，index = 2，ok也是true，但是不会commit
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
 	}
@@ -346,24 +348,25 @@ func TestFailNoAgree2B(t *testing.T) {
 
 	time.Sleep(2 * RaftElectionTimeout)
 
-	n, _ := cfg.nCommitted(index)
+	n, _ := cfg.nCommitted(index) // index = 2这个部分不能commit
 	if n > 0 {
 		t.Fatalf("%v committed but no majority", n)
 	}
 
-	// repair
+	// repair，重新上线下线的server
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
 	cfg.connect((leader + 3) % servers)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
+	// 掉线的server可能自己单独选了一个leader，所以后面重新start的index可能是2或者3
 	leader2 := cfg.checkOneLeader()
-	index2, _, ok2 := cfg.rafts[leader2].Start(30)
+	index2, _, ok2 := cfg.rafts[leader2].Start(30) // index是2，说明选了一个新的leader，index是3说明leader没有变
 	if ok2 == false {
 		t.Fatalf("leader2 rejected Start()")
 	}
-	if index2 < 2 || index2 > 3 {
+	if index2 < 2 || index2 > 3 { // index在2，3之外就出错了
 		t.Fatalf("unexpected index %v", index2)
 	}
 
@@ -380,7 +383,7 @@ func TestConcurrentStarts2B(t *testing.T) {
 	cfg.begin("Test (2B): concurrent Start()s")
 
 	var success bool
-loop:
+loop: // 做个标记，goto，continue用的，没别的意思
 	for try := 0; try < 5; try++ {
 		if try > 0 {
 			// give solution some time to settle
@@ -388,8 +391,8 @@ loop:
 		}
 
 		leader := cfg.checkOneLeader()
-		_, term, ok := cfg.rafts[leader].Start(1)
-		if !ok {
+		_, term, ok := cfg.rafts[leader].Start(1) // start一个
+		if !ok {                                  // 不是leader就重新loop
 			// leader moved on really quickly
 			continue
 		}
@@ -408,7 +411,7 @@ loop:
 				if ok != true {
 					return
 				}
-				is <- i
+				is <- i // index到is的chan中
 			}(ii)
 		}
 
@@ -449,6 +452,7 @@ loop:
 			continue
 		}
 
+		// 遍历查找commend来确认是不是commit成功
 		for ii := 0; ii < iters; ii++ {
 			x := 100 + ii
 			ok := false
@@ -457,7 +461,7 @@ loop:
 					ok = true
 				}
 			}
-			if ok == false {
+			if ok == false { // 丢失了一个commend
 				t.Fatalf("cmd %v missing in %v", x, cmds)
 			}
 		}
@@ -480,9 +484,9 @@ func TestRejoin2B(t *testing.T) {
 
 	cfg.begin("Test (2B): rejoin of partitioned leader")
 
-	cfg.one(101, servers, true)
+	cfg.one(101, servers, true) // index = 1
 
-	// leader network failure
+	// leader network failure，下线leader
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
 
@@ -492,25 +496,26 @@ func TestRejoin2B(t *testing.T) {
 	cfg.rafts[leader1].Start(104)
 
 	// new leader commits, also for index=2
-	cfg.one(103, 2, true)
+	cfg.one(103, 2, true) // index = 2， 循环是true
 
-	// new leader network failure
+	// new leader network failure， 下线第二个leader
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
 
-	// old leader connected again
+	// old leader connected again，恢复第一个leader
 	cfg.connect(leader1)
 
-	cfg.one(104, 2, true)
+	cfg.one(104, 2, true) // index = 3， 循环是true
 
-	// all together now
+	// all together now， 全部恢复
 	cfg.connect(leader2)
 
-	cfg.one(105, servers, true)
+	cfg.one(105, servers, true) // index = 4，循环是true
 
 	cfg.end()
 }
 
+// 只是测试流程能不能走通，上线的server数量和commit的联系
 func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
@@ -518,67 +523,67 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.begin("Test (2B): leader backs up quickly over incorrect follower logs")
 
-	cfg.one(rand.Int(), servers, true)
+	cfg.one(rand.Int(), servers, true) // start，循环，index = 1
 
-	// put leader and one follower in a partition
+	// put leader and one follower in a partition，下线三个server
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
 
 	// submit lots of commands that won't commit
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 50; i++ { // 加50个不会commit的log，index顺延了
 		cfg.rafts[leader1].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
-	cfg.disconnect((leader1 + 0) % servers)
+	cfg.disconnect((leader1 + 0) % servers) // 剩下俩也下线
 	cfg.disconnect((leader1 + 1) % servers)
 
-	// allow other partition to recover
+	// allow other partition to recover ， 上线之前下线的三个
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
 
 	// lots of successful commands to new group.
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 50; i++ { // 这三个可以选出有效的新的leader，这些可以提交
 		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now another partitioned leader and one follower
-	leader2 := cfg.checkOneLeader()
+	leader2 := cfg.checkOneLeader() // 下线一个上线的非leader的server
 	other := (leader1 + 2) % servers
 	if leader2 == other {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
 
-	// lots more commands that won't commit
+	// lots more commands that won't commit，线上只有两个，这些不会commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
 	}
 
 	time.Sleep(RaftElectionTimeout / 2)
 
-	// bring original leader back to life,
+	// bring original leader back to life, 全部下线
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 	}
-	cfg.connect((leader1 + 0) % servers)
+	cfg.connect((leader1 + 0) % servers) // 重新上线最开始的几个server
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
 
-	// lots of successful commands to new group.
+	// lots of successful commands to new group. 满3个server，可以commit
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
 	}
 
 	// now everyone
-	for i := 0; i < servers; i++ {
+	for i := 0; i < servers; i++ { // 全部上线
 		cfg.connect(i)
 	}
-	cfg.one(rand.Int(), servers, true)
+	cfg.one(rand.Int(), servers, true) // 循环start，不用管index了
 
 	cfg.end()
 }
@@ -590,8 +595,9 @@ func TestCount2B(t *testing.T) {
 
 	cfg.begin("Test (2B): RPC counts aren't too high")
 
-	rpcs := func() (n int) {
+	rpcs := func() (n int) { // 得到所有的servers传入RPC的数量
 		for j := 0; j < servers; j++ {
+			// get a server's count of incoming RPCs.
 			n += cfg.rpcCount(j)
 		}
 		return
@@ -599,7 +605,7 @@ func TestCount2B(t *testing.T) {
 
 	leader := cfg.checkOneLeader()
 
-	total1 := rpcs()
+	total1 := rpcs() // 先统计一下当下所有servers的RPC的数量
 
 	if total1 > 30 || total1 < 1 {
 		t.Fatalf("too many or few RPCs (%v) to elect initial leader\n", total1)
@@ -693,6 +699,7 @@ loop:
 	cfg.end()
 }
 
+// ----------------------------2C-------------------------------
 func TestPersist12C(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -700,23 +707,24 @@ func TestPersist12C(t *testing.T) {
 
 	cfg.begin("Test (2C): basic persistence")
 
-	cfg.one(11, servers, true)
+	cfg.one(11, servers, true) // 循环start，index = 1，让persister有更新有内容
 
 	// crash and re-start all
 	for i := 0; i < servers; i++ {
-		cfg.start1(i, cfg.applier)
+		cfg.start1(i, cfg.applier) // start1就是保存原来的persist然后新恢复一个新的make
 	}
+	// 下线并重新上线所有的servers，和start1不一样
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
 		cfg.connect(i)
 	}
 
-	cfg.one(12, servers, true)
+	cfg.one(12, servers, true) // 循环start，
 
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	cfg.start1(leader1, cfg.applier)
-	cfg.connect(leader1)
+	cfg.start1(leader1, cfg.applier) // 感觉就是做一个替换的操作，并没有改变原来peers的状态
+	cfg.connect(leader1)             // 所以需要重新上线
 
 	cfg.one(13, servers, true)
 
@@ -747,22 +755,25 @@ func TestPersist22C(t *testing.T) {
 	cfg.begin("Test (2C): more persistence")
 
 	index := 1
+	// 没有上锁，中间有并发
 	for iters := 0; iters < 5; iters++ {
-		cfg.one(10+index, servers, true)
+		cfg.one(10+index, servers, true) // 先循环start一个Entry，index = 1，persister有所更新和内容
 		index++
 
+		// 下线两个follower
 		leader1 := cfg.checkOneLeader()
-
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 
-		cfg.one(10+index, servers-2, true)
+		cfg.one(10+index, servers-2, true) // 循环start一个Entry，index = 2,这个可以commit
 		index++
 
+		// 全部下线
 		cfg.disconnect((leader1 + 0) % servers)
 		cfg.disconnect((leader1 + 3) % servers)
 		cfg.disconnect((leader1 + 4) % servers)
 
+		// 换掉两个server并上线
 		cfg.start1((leader1+1)%servers, cfg.applier)
 		cfg.start1((leader1+2)%servers, cfg.applier)
 		cfg.connect((leader1 + 1) % servers)
@@ -770,12 +781,14 @@ func TestPersist22C(t *testing.T) {
 
 		time.Sleep(RaftElectionTimeout)
 
+		// 再换掉一个再上线
 		cfg.start1((leader1+3)%servers, cfg.applier)
 		cfg.connect((leader1 + 3) % servers)
 
-		cfg.one(10+index, servers-2, true)
+		cfg.one(10+index, servers-2, true) // 循环start一个Entry，这个应该可以commit并且index = 3
 		index++
 
+		// 剩下的server也上线
 		cfg.connect((leader1 + 4) % servers)
 		cfg.connect((leader1 + 0) % servers)
 	}
@@ -792,25 +805,27 @@ func TestPersist32C(t *testing.T) {
 
 	cfg.begin("Test (2C): partitioned leader and one follower crash, leader restarts")
 
-	cfg.one(101, 3, true)
+	cfg.one(101, 3, true) // start一边，传入数据
 
-	leader := cfg.checkOneLeader()
+	leader := cfg.checkOneLeader() // 下线一个follower
 	cfg.disconnect((leader + 2) % servers)
 
-	cfg.one(102, 2, true)
+	cfg.one(102, 2, true) // 再start一个，传入数据
 
+	// shut down和保存leader和另外一个follower，再上线之前的follower
+	// 并且复制恢复leader并上线
 	cfg.crash1((leader + 0) % servers)
 	cfg.crash1((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
 	cfg.start1((leader+0)%servers, cfg.applier)
 	cfg.connect((leader + 0) % servers)
 
-	cfg.one(103, 2, true)
+	cfg.one(103, 2, true) // 可以commit
 
-	cfg.start1((leader+1)%servers, cfg.applier)
+	cfg.start1((leader+1)%servers, cfg.applier) // 再复制并上线剩下的follower
 	cfg.connect((leader + 1) % servers)
 
-	cfg.one(104, servers, true)
+	cfg.one(104, servers, true) // 可以commit
 
 	cfg.end()
 }
@@ -824,6 +839,11 @@ func TestPersist32C(t *testing.T) {
 // alive servers isn't enough to form a majority, perhaps start a new server.
 // The leader in a new term may try to finish replicating log entries that
 // haven't been committed yet.
+// 测试论文图8描述的场景，每次迭代都让leader在log中插入一个command
+// 如果有leader，令其以高概率快速失败（可能没有提交命令），
+// 或者在一段时间后以低概率崩溃（最有可能提交命令）。
+// 如果存活server的数量不足以形成多数，则可能启动一个新server。
+// 新任期的leader可能会尝试完成对尚未提交的entries的复制。
 //
 func TestFigure82C(t *testing.T) {
 	servers := 5
@@ -832,12 +852,12 @@ func TestFigure82C(t *testing.T) {
 
 	cfg.begin("Test (2C): Figure 8")
 
-	cfg.one(rand.Int(), 1, true)
+	cfg.one(rand.Int(), 1, true) // start一次，persistent有记录
 
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		leader := -1
-		for i := 0; i < servers; i++ {
+		for i := 0; i < servers; i++ { // 找leader并start一次
 			if cfg.rafts[i] != nil {
 				_, _, ok := cfg.rafts[i].Start(rand.Int())
 				if ok {
@@ -854,22 +874,22 @@ func TestFigure82C(t *testing.T) {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
-		if leader != -1 {
+		if leader != -1 { // leader存在，让其fail，并且保存persistent
 			cfg.crash1(leader)
 			nup -= 1
 		}
 
-		if nup < 3 {
+		if nup < 3 { // server数量需要过半
 			s := rand.Int() % servers
 			if cfg.rafts[s] == nil {
-				cfg.start1(s, cfg.applier)
+				cfg.start1(s, cfg.applier) // 复制并连接
 				cfg.connect(s)
 				nup += 1
 			}
 		}
 	}
 
-	for i := 0; i < servers; i++ {
+	for i := 0; i < servers; i++ { // 下线的都复制上线
 		if cfg.rafts[i] == nil {
 			cfg.start1(i, cfg.applier)
 			cfg.connect(i)
@@ -910,6 +930,7 @@ func TestUnreliableAgree2C(t *testing.T) {
 	cfg.end()
 }
 
+// ----------------
 func TestFigure8Unreliable2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
@@ -922,10 +943,10 @@ func TestFigure8Unreliable2C(t *testing.T) {
 	nup := servers
 	for iters := 0; iters < 1000; iters++ {
 		if iters == 200 {
-			cfg.setlongreordering(true)
+			cfg.setlongreordering(true) // 延迟回复很长时间，和reliable的区别
 		}
 		leader := -1
-		for i := 0; i < servers; i++ {
+		for i := 0; i < servers; i++ { // 找到leader并start一次
 			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
 			if ok && cfg.connected[i] {
 				leader = i
@@ -940,6 +961,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 		}
 
+		// leader下线并且不保存persistent，和reliable的区别
 		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
 			cfg.disconnect(leader)
 			nup -= 1
@@ -954,7 +976,7 @@ func TestFigure8Unreliable2C(t *testing.T) {
 		}
 	}
 
-	for i := 0; i < servers; i++ {
+	for i := 0; i < servers; i++ { // 全连接上
 		if cfg.connected[i] == false {
 			cfg.connect(i)
 		}
@@ -1118,6 +1140,7 @@ func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
 }
 
+// ---------------------------2D-----------------------------
 const MAXLOGSIZE = 2000
 
 func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash bool) {
