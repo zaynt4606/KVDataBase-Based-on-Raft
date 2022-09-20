@@ -830,77 +830,6 @@ func TestPersist32C(t *testing.T) {
 	cfg.end()
 }
 
-//
-// Test the scenarios described in Figure 8 of the extended Raft paper. Each
-// iteration asks a leader, if there is one, to insert a command in the Raft
-// log.  If there is a leader, that leader will fail quickly with a high
-// probability (perhaps without committing the command), or crash after a while
-// with low probability (most likey committing the command).  If the number of
-// alive servers isn't enough to form a majority, perhaps start a new server.
-// The leader in a new term may try to finish replicating log entries that
-// haven't been committed yet.
-// 测试论文图8描述的场景，每次迭代都让leader在log中插入一个command
-// 如果有leader，令其以高概率快速失败（可能没有提交命令），
-// 或者在一段时间后以低概率崩溃（最有可能提交命令）。
-// 如果存活server的数量不足以形成多数，则可能启动一个新server。
-// 新任期的leader可能会尝试完成对尚未提交的entries的复制。
-//
-func TestFigure82C(t *testing.T) {
-	servers := 5
-	cfg := make_config(t, servers, false, false)
-	defer cfg.cleanup()
-
-	cfg.begin("Test (2C): Figure 8")
-
-	cfg.one(rand.Int(), 1, true) // start一次，persistent有记录
-
-	nup := servers
-	for iters := 0; iters < 1000; iters++ {
-		leader := -1
-		for i := 0; i < servers; i++ { // 找leader并start一次
-			if cfg.rafts[i] != nil {
-				_, _, ok := cfg.rafts[i].Start(rand.Int())
-				if ok {
-					leader = i
-				}
-			}
-		}
-
-		if (rand.Int() % 1000) < 100 {
-			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		} else {
-			ms := (rand.Int63() % 13)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		}
-
-		if leader != -1 { // leader存在，让其fail，并且保存persistent
-			cfg.crash1(leader)
-			nup -= 1
-		}
-
-		if nup < 3 { // server数量需要过半
-			s := rand.Int() % servers
-			if cfg.rafts[s] == nil {
-				cfg.start1(s, cfg.applier) // 复制并连接
-				cfg.connect(s)
-				nup += 1
-			}
-		}
-	}
-
-	for i := 0; i < servers; i++ { // 下线的都复制上线
-		if cfg.rafts[i] == nil {
-			cfg.start1(i, cfg.applier)
-			cfg.connect(i)
-		}
-	}
-
-	cfg.one(rand.Int(), servers, true)
-
-	cfg.end()
-}
-
 func TestUnreliableAgree2C(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, true, false)
@@ -926,63 +855,6 @@ func TestUnreliableAgree2C(t *testing.T) {
 	wg.Wait()
 
 	cfg.one(100, servers, true)
-
-	cfg.end()
-}
-
-// ----------------
-func TestFigure8Unreliable2C(t *testing.T) {
-	servers := 5
-	cfg := make_config(t, servers, true, false)
-	defer cfg.cleanup()
-
-	cfg.begin("Test (2C): Figure 8 (unreliable)")
-
-	cfg.one(rand.Int()%10000, 1, true)
-
-	nup := servers
-	for iters := 0; iters < 1000; iters++ {
-		if iters == 200 {
-			cfg.setlongreordering(true) // 延迟回复很长时间，和reliable的区别
-		}
-		leader := -1
-		for i := 0; i < servers; i++ { // 找到leader并start一次
-			_, _, ok := cfg.rafts[i].Start(rand.Int() % 10000)
-			if ok && cfg.connected[i] {
-				leader = i
-			}
-		}
-
-		if (rand.Int() % 1000) < 100 {
-			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		} else {
-			ms := (rand.Int63() % 13)
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-		}
-
-		// leader下线并且不保存persistent，和reliable的区别
-		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
-			cfg.disconnect(leader)
-			nup -= 1
-		}
-
-		if nup < 3 {
-			s := rand.Int() % servers
-			if cfg.connected[s] == false {
-				cfg.connect(s)
-				nup += 1
-			}
-		}
-	}
-
-	for i := 0; i < servers; i++ { // 全连接上
-		if cfg.connected[i] == false {
-			cfg.connect(i)
-		}
-	}
-
-	cfg.one(rand.Int()%10000, servers, true)
 
 	cfg.end()
 }
@@ -1138,6 +1010,137 @@ func TestReliableChurn2C(t *testing.T) {
 
 func TestUnreliableChurn2C(t *testing.T) {
 	internalChurn(t, true)
+}
+
+//
+// Test the scenarios described in Figure 8 of the extended Raft paper. Each
+// iteration asks a leader, if there is one, to insert a command in the Raft
+// log.  If there is a leader, that leader will fail quickly with a high
+// probability (perhaps without committing the command), or crash after a while
+// with low probability (most likey committing the command).  If the number of
+// alive servers isn't enough to form a majority, perhaps start a new server.
+// The leader in a new term may try to finish replicating log entries that
+// haven't been committed yet.
+// 测试论文图8描述的场景，每次迭代都让leader在log中插入一个command
+// 如果有leader，令其以高概率快速失败（可能没有提交命令），
+// 或者在一段时间后以低概率崩溃（最有可能提交命令）。
+// 如果存活server的数量不足以形成多数，则可能启动一个新server。
+// 新任期的leader可能会尝试完成对尚未提交的entries的复制。
+// figure8这两个测试在完成2D进行lastincludedindex的缩减之后可以顺利通过
+//
+func TestFigure82C(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, false, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): Figure 8")
+
+	cfg.one(rand.Int(), 1, true) // start一次，persistent有记录
+
+	nup := servers
+	for iters := 0; iters < 1000; iters++ {
+		leader := -1
+		for i := 0; i < servers; i++ { // 找leader并start一次
+			if cfg.rafts[i] != nil {
+				_, _, ok := cfg.rafts[i].Start(rand.Int())
+				if ok {
+					leader = i
+				}
+			}
+		}
+
+		if (rand.Int() % 1000) < 100 {
+			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		} else {
+			ms := (rand.Int63() % 13)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+
+		if leader != -1 { // leader存在，让其fail，并且保存persistent
+			cfg.crash1(leader)
+			nup -= 1
+		}
+
+		if nup < 3 { // server数量需要过半
+			s := rand.Int() % servers
+			if cfg.rafts[s] == nil {
+				cfg.start1(s, cfg.applier) // 复制并连接
+				cfg.connect(s)
+				nup += 1
+			}
+		}
+	}
+
+	for i := 0; i < servers; i++ { // 下线的都复制上线
+		if cfg.rafts[i] == nil {
+			cfg.start1(i, cfg.applier)
+			cfg.connect(i)
+		}
+	}
+
+	cfg.one(rand.Int(), servers, true)
+
+	cfg.end()
+}
+
+// ----------------
+func TestFigure8Unreliable2C(t *testing.T) {
+	servers := 5
+	cfg := make_config(t, servers, true, false)
+	defer cfg.cleanup()
+
+	cfg.begin("Test (2C): Figure 8 (unreliable)")
+	num := rand.Int() % 10000
+	cfg.one(num, 1, true)
+
+	nup := servers
+	for iters := 0; iters < 1000; iters++ {
+		if iters == 200 {
+			cfg.setlongreordering(true) // 延迟回复很长时间，和reliable的区别
+		}
+		leader := -1
+		for i := 0; i < servers; i++ { // 找到leader并start一次
+			num := rand.Int() % 10000
+			_, _, ok := cfg.rafts[i].Start(num)
+			if ok && cfg.connected[i] {
+				leader = i
+			}
+		}
+
+		if (rand.Int() % 1000) < 100 { // 1/10的概率sleep 1000ms, 大部分时间sleep 13ms
+			ms := rand.Int63() % (int64(RaftElectionTimeout/time.Millisecond) / 2)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		} else {
+			ms := (rand.Int63() % 13)
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
+
+		// 不保存persistent，和reliable的区别, 下面是rand(1000) < 500 , 1/2的概率下线这个leader下线
+		if leader != -1 && (rand.Int()%1000) < int(RaftElectionTimeout/time.Millisecond)/2 {
+			cfg.disconnect(leader)
+			nup -= 1
+		}
+
+		if nup < 3 { // 只是重连并不恢复persistent
+			s := rand.Int() % servers
+			if cfg.connected[s] == false {
+				cfg.connect(s)
+				nup += 1
+			}
+		}
+	}
+
+	for i := 0; i < servers; i++ { // 全连接上
+		if cfg.connected[i] == false {
+			cfg.connect(i)
+		}
+	}
+
+	num = rand.Int() % 10000
+	cfg.one(num, servers, true)
+
+	cfg.end()
 }
 
 // ---------------------------2D-----------------------------

@@ -96,13 +96,12 @@ type Raft struct {
 	electionTimer time.Time
 
 	// 2A
-	logIndex      int // server的最后一个index，不过用函数realLastIndex替代了
-	currentState  int
-	currentLeader int
+	logIndex     int // server的最后一个index，不过用函数realLastIndex替代了
+	currentState int
+	// currentLeader int
 	// 所有servers需要的持久化变量
 	currentTerm int // 当前任期, start from 0
 	votedFor    int // 当前任期把票投给了谁 candidateId that received vote in current term
-
 	// 2B
 	applyCh     chan ApplyMsg // chan中是所有可提交的日志，也就是server保存这条日志的数量过半
 	log         []Entry       // 日志条目数组
@@ -167,6 +166,19 @@ type AppendEntriesReply struct {
 	NextIndex int  // 发生conflict,reply传过来的index用来更新leader的nextIndex[i]
 }
 
+type InstallSnapshotArgs struct {
+	Term              int    // leader's term
+	LeaderId          int    //
+	LastIncludedIndex int    // snapshot最后applied的日志下标
+	LastIncludedTerm  int    // snapshot最后applied的任期
+	Data              []byte // snapshot区块的原始字节流数据
+	Done              bool   // true if this is the last chunk
+}
+
+type InstallSnapshotReply struct {
+	Term int
+}
+
 //
 // --------------------------------------------------------------------
 //
@@ -187,14 +199,15 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
+	rf.mu.Lock()
 	// Your initialization code here (2A, 2B, 2C).
 	// 2A
 	rf.votedFor = NONE
-	rf.currentLeader = NONE
-	rf.currentState = NONE
+	// rf.currentLeader = NONE
+	rf.currentState = Follower
 	rf.currentTerm = 0
 
-	// 2B
+	// 2B, 2C
 	// 初始化的时候就加一个进入到log
 	rf.log = []Entry{}
 	rf.log = append(rf.log, Entry{})
@@ -204,10 +217,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.commitIndex = 0
 	rf.lastApplied = 0
 
+	rf.lastIncludedIndex = 0
+	rf.lastIncludedTerm = 0
+
+	rf.mu.Unlock()
 	// initialize from state persisted before a crash,读取之前persist的成员
 	rf.readPersist(persister.ReadRaftState())
 
-	if rf.lastIncludedIndex > 0 {
+	if rf.lastIncludedIndex > 0 { // 读取完persistent之后需要更新一下lastApplied
 		// 已经提交有snapshot
 		rf.lastApplied = rf.lastIncludedIndex
 	}
@@ -230,10 +247,11 @@ func (rf *Raft) electionTicker() {
 		// sleep 一个范围内的随机时间
 		time.Sleep(time.Duration(generateOverTime(int64(rf.me))) * time.Millisecond)
 		rf.mu.Lock()
+		//Timer如果小于sleep睡眠之前定义的时间，说明Timer没被更新为最新的时间，则发起选举
 		if rf.electionTimer.Before(nowTime) && rf.currentState != Leader {
 			// 开始选举
 			rf.StartElection()
-			// rf.electionTimer = time.Now() // 都放到StartElection中实现
+			rf.electionTimer = time.Now()
 		}
 		rf.mu.Unlock()
 	}
@@ -266,15 +284,15 @@ func (rf *Raft) committedTicker() {
 		}
 
 		// 存储没有更新的一直到需要更新的ApplyMsg，最后一起加入到chan中
-		messages := []ApplyMsg{}
+		messages := make([]ApplyMsg, 0)
 		for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.realLastIndex() {
 			// 一直到commitIndex，但不能超过最后一个，因为不是每个server都存了commitIndex
 			rf.lastApplied++
 			messages = append(messages, ApplyMsg{
-				CommandValid: true,
-				Command:      rf.indexToEntry(rf.lastApplied).Data,
-				CommandIndex: rf.lastApplied,
-				// SnapshotValid: false,
+				CommandValid:  true,
+				Command:       rf.indexToEntry(rf.lastApplied).Data,
+				CommandIndex:  rf.lastApplied,
+				SnapshotValid: false,
 			})
 		}
 		rf.mu.Unlock()
@@ -286,7 +304,7 @@ func (rf *Raft) committedTicker() {
 }
 
 //
-// ----------------------------------------leader选举-------------------------------------------
+// ----------------------------------------2A-leader选举-------------------------------------------
 //
 func (rf *Raft) StartElection() {
 	// 自己发起选取，改变状态， 论文中server成为Candidates的要求
@@ -296,8 +314,8 @@ func (rf *Raft) StartElection() {
 	rf.electionTimer = time.Now()
 	// 保存要保存的东西,save Raft's persistent state to stable storage,
 	rf.persist()
+	// rf.mu.Lock()
 	voteNum := 1 // 统计票数，自己给自己的一票
-
 	// 遍历所有raft的server
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me { // 跳过Candidate
@@ -309,9 +327,7 @@ func (rf *Raft) StartElection() {
 			args := RequestVoteArgs{ // 投票要发的args
 				rf.currentTerm,
 				rf.me,
-				// rf.logIndex,
 				rf.realLastIndex(),
-				// rf.log[len(rf.log)-1].Term,
 				rf.realLastTerm(),
 			}
 			reply := RequestVoteReply{} // 投完票接收的reply
@@ -319,11 +335,11 @@ func (rf *Raft) StartElection() {
 			// 发送并获得reply，res接到是否发送成功
 			// res := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
 			res := rf.sendRequestVote(server, &args, &reply) // 下面的RequestVote在这里使用
-			rf.electionTimer = time.Now()                    //给别的peer投票的时候也更新，函数里面其实已经更新了
+			// rf.electionTimer = time.Now()                    //给别的peer投票的时候也更新，函数里面其实已经更新了
 			if res {
 				rf.mu.Lock()
 				// 自身如果不是Candidate或者任期不符直接退出
-				if rf.currentState != Candidate || args.Term != rf.currentTerm {
+				if rf.currentState != Candidate || args.Term < rf.currentTerm {
 					rf.mu.Unlock()
 					return
 				}
@@ -338,16 +354,16 @@ func (rf *Raft) StartElection() {
 					rf.mu.Unlock()
 					return
 				}
-				if reply.VoteGranted {
+				if reply.VoteGranted && args.Term == rf.currentTerm {
 					voteNum++ // 统计票数
 					// 票数过半
 					if voteNum > len(rf.peers)/2 {
 						// 修改状态
 						rf.currentState = Leader
-						rf.currentLeader = rf.me
+						// rf.currentLeader = rf.me
 						rf.votedFor = NONE
-
 						rf.persist()
+
 						// 更新leader管控信息
 						rf.nextIndex = make([]int, len(rf.peers))
 						for i := 0; i < len(rf.peers); i++ {
@@ -355,11 +371,12 @@ func (rf *Raft) StartElection() {
 						}
 						rf.matchIndex = make([]int, len(rf.peers))
 						rf.matchIndex[rf.me] = rf.realLastIndex()
-						rf.electionTimer = time.Now()
 
+						rf.electionTimer = time.Now()
 						rf.mu.Unlock()
 						return
 					}
+
 				}
 				rf.mu.Unlock()
 				return
@@ -412,12 +429,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 	rf.votedFor = args.CandidateID
+	rf.currentTerm = args.Term
 	rf.electionTimer = time.Now()
 	rf.persist()
 	return
 }
 
-// ------------------------------------------日志增量部分------------------------------
+// ------------------------------------------2B,2C,2D-日志增量部分------------------------------
 // leader定时发送heartbeat的操作
 func (rf *Raft) leaderAppendEntries() {
 	// 传入的rf是leader，其他的server更新
@@ -428,10 +446,10 @@ func (rf *Raft) leaderAppendEntries() {
 		// 每个server开启协程
 		go func(server int) {
 			rf.mu.Lock()
-			// if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
-			// 	rf.mu.Unlock()
-			// 	return
-			// }
+			if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
+				rf.mu.Unlock()
+				return
+			}
 			// ------------------------定义发送的RPC部分-------------------------------------
 			// 填充一个要发送的Entryargs
 			prevLogIndex, prevLogTerm := rf.realPreLog(server)
@@ -448,7 +466,7 @@ func (rf *Raft) leaderAppendEntries() {
 			// If last log index ≥ nextIndex for a follower:
 			// send AppendEntries RPC with log entries starting at nextIndex
 			if rf.realLastIndex() >= rf.nextIndex[server] {
-				entries := []Entry{}
+				entries := make([]Entry, 0)
 				// 从nextIndex到最后一个，考虑snapshot,在log中不能直接用nextIndex
 				// log中从nextIndex到最后是要去掉log之前的部分的长度
 				entries = append(entries, rf.log[rf.nextIndex[server]-rf.lastIncludedIndex:]...)
@@ -480,7 +498,7 @@ func (rf *Raft) leaderAppendEntries() {
 					rf.currentTerm = reply.Term
 					rf.electionTimer = time.Now() // 同时把收到的回复当作heartbeat
 					rf.currentState = Follower
-					rf.votedFor = NONE // 还没有人发送选举消息
+					rf.votedFor = NONE
 					rf.persist()
 					return
 				}
@@ -493,7 +511,7 @@ func (rf *Raft) leaderAppendEntries() {
 
 					// 一个个index遍历然后统计同步的peers数目，判断要不要提交这个
 					// 也就是更新commitIndex
-					for index := rf.realLastIndex(); index >= rf.lastIncludedIndex; index-- {
+					for index := rf.realLastIndex(); index >= rf.lastIncludedIndex+1; index-- {
 						// 从外向里，只要最外面的可以提交了，就不用管前面的了，前面的一定提交了
 						num := 1 // 加上了自己
 						for i := 0; i < len(rf.peers); i++ {
@@ -534,12 +552,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	// 这里插入一个更新server状态的heartbeat的过程
+	reply.Success = true // 没什么问题的话reply这么设置
+	reply.Term = args.Term
+	reply.NextIndex = -1
+
+	// 这里插入一个更新server状态的heartbeat的过程,要在上面那个判断之下
 	rf.currentTerm = args.Term // 假如有更新的term需要更新
 	rf.currentState = Follower
-	rf.electionTimer = time.Now() // heartbeat来更新选举时间
 	rf.votedFor = NONE
 	rf.persist()
+	rf.electionTimer = time.Now() // heartbeat来更新选举时间
 
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
@@ -547,13 +569,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.lastIncludedIndex > args.PrevLogIndex {
 		reply.Success = false
 		reply.NextIndex = rf.realLastIndex() + 1
-		reply.Term = args.Term
 		return
 	}
 	// 自身有缺失
 	if rf.realLastIndex() < args.PrevLogIndex {
 		reply.Success = false
-		reply.Term = args.Term
 		reply.NextIndex = rf.realLastIndex()
 		return
 	}
@@ -564,7 +584,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// delete the existing entry and all that follow it (§5.3)
 	if args.PrevLogTerm != rf.indexToTerm(args.PrevLogIndex) {
 		reply.Success = false
-		reply.Term = args.Term
 		tempTerm := rf.indexToTerm(args.PrevLogIndex)
 		for index := args.PrevLogIndex; index >= rf.lastIncludedIndex; index-- {
 			if rf.indexToTerm(index) != tempTerm {
@@ -586,9 +605,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	// 没啥问题正常返回
-	reply.Success = true
-	reply.Term = args.Term
-	reply.NextIndex = -1
+	// reply.Success = true
+	// reply.Term = args.Term
+	// reply.NextIndex = -1
 	return
 
 }
@@ -629,7 +648,6 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (2C).
-	// Example:
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
@@ -666,50 +684,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
+func (rf *Raft) LeaderSendSnapshot(server int) {
 
 }
 
-//
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
-// if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
-// the leader.
-//
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	// Your code here (2B).
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	// 被kill了也要返回
-	if rf.killed() {
-		return -1, -1, false
-	}
-	// 不是leader返回false
-	if rf.currentState != Leader {
-		return -1, -1, false
-	}
+// InstallSnapshot 主函数
+func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 
-	index := rf.realLastIndex() + 1 // 提交后会出现的index编号，也就是最后一个index + 1
-	term := rf.currentTerm          //当前任期
-	isLeader := true                // 自己是leader
+}
 
-	// 加入新的entry到leader的log中
-	// 这里加入新的Entry，那上面的index其实指的就是这个Entry，也就是新加入的Entry的index
-	rf.log = append(rf.log, Entry{Term: term, Index: index, Data: command})
-	rf.persist()
+// the service says it has created a snapshot that hasall info up to and including index.
+// 该服务说它已经创建了一个快照，其中包含所有信息，包括索引。
+// this means the service no longer needs the log through (and including) that index.
+// 服务不再需要通过（并包括）该索引的日志。
+// Raft should now trim its log as much as possible. Raft应该尽可能得修剪日志
+func (rf *Raft) Snapshot(index int, snapshot []byte) { // 也就是丢掉index之前的log日志
+	// Your code here (2D).
 
-	return index, term, isLeader
 }

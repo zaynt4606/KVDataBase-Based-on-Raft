@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"log"
 	"math/rand"
 	"sync/atomic"
@@ -56,6 +57,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
+func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	return ok
+}
+
 // return currentTerm and whether this server believes it is the leader.
 // checkTerms中用到
 func (rf *Raft) GetState() (int, bool) {
@@ -65,6 +71,46 @@ func (rf *Raft) GetState() (int, bool) {
 	term := rf.currentTerm
 	isleader := (rf.currentState == Leader)
 	return term, isleader
+}
+
+//
+// the service using Raft (e.g. a k/v server) wants to start
+// agreement on the next command to be appended to Raft's log. if this
+// server isn't the leader, returns false. otherwise start the
+// agreement and return immediately. there is no guarantee that this
+// command will ever be committed to the Raft log, since the leader
+// may fail or lose an election. even if the Raft instance has been killed,
+// this function should return gracefully.
+//
+// the first return value is the index that the command will appear at
+// if it's ever committed. the second return value is the current
+// term. the third return value is true if this server believes it is
+// the leader.
+//
+
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// 被kill了也要返回
+	if rf.killed() {
+		return -1, -1, false
+	}
+	// 不是leader返回false
+	if rf.currentState != Leader {
+		return -1, -1, false
+	}
+
+	index := rf.realLastIndex() + 1 // 提交后会出现的index编号，也就是最后一个index + 1
+	term := rf.currentTerm          //当前任期
+	isLeader := true                // 自己是leader
+
+	// 加入新的entry到leader的log中
+	// 这里加入新的Entry，那上面的index其实指的就是这个Entry，也就是新加入的Entry的index
+	rf.log = append(rf.log, Entry{Term: term, Index: index, Data: command})
+	rf.persist()
+
+	return index, term, isLeader
 }
 
 //
@@ -89,29 +135,28 @@ func (rf *Raft) killed() bool {
 }
 
 // The ticker go routine starts a new election if this peer hasn't received heartsbeats recently.
+// 这里没有用到，开了3个新的ticker
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		// Your code here to check if a leader election should
-		// be started and to randomize sleeping time using
-		// time.Sleep().
-
+		// Your code here to check if a leader election should be started
+		// and to randomize sleeping time using time.Sleep().
 	}
 }
 
 // --------------------------------------自定义----------------------------------------
-// 最小值min
-func min(num int, num1 int) int {
-	if num > num1 {
-		return num1
-	} else {
-		return num
-	}
-}
 
 // 通过不同的随机种子生成不同的过期时间
 func generateOverTime(server int64) int {
 	rand.Seed(time.Now().Unix() + server)
 	return rand.Intn(MoreVoteTime) + MinVoteTime
+}
+
+func min(a int, b int) int {
+	if a <= b {
+		return a
+	} else {
+		return b
+	}
 }
 
 // candidate’s log is at least as up-to-date as receiver’s log
@@ -147,6 +192,9 @@ func (rf *Raft) indexToTerm(curIndex int) int {
 		return rf.lastIncludedTerm
 	}
 	// 按照距离lastIncludedIndex的长度在log中找到
+	if curIndex < rf.lastIncludedIndex {
+		fmt.Println("curIndex =", curIndex, "rf.lastIncludedIndex =", rf.lastIncludedIndex)
+	}
 	return rf.log[curIndex-rf.lastIncludedIndex].Term
 }
 
@@ -161,7 +209,7 @@ func (rf *Raft) realPreLog(server int) (int, int) {
 	lastIndex := rf.realLastIndex()
 	// server对应的下一个的前一个，
 	entryIndex := rf.nextIndex[server] - 1
-	//
+	// 一开始就加了一个Entry在log中，index从1开始，
 	if entryIndex == lastIndex+1 {
 		entryIndex = lastIndex
 	}
