@@ -37,7 +37,9 @@ import (
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
 // committed log entry.
-//
+// 当每个 Raft peer 意识到连续的日志条目被提交时，
+// peer 应该通过传递给 Make() 的 applyCh 向同一服务器上的服务（或测试器）发送 ApplyMsg。
+// 将 CommandValid 设置为 true 以指示 ApplyMsg 包含新提交的日志条目。
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
@@ -172,7 +174,7 @@ type InstallSnapshotArgs struct {
 	LastIncludedIndex int    // snapshot最后applied的日志下标
 	LastIncludedTerm  int    // snapshot最后applied的任期
 	Data              []byte // snapshot区块的原始字节流数据
-	Done              bool   // true if this is the last chunk
+	// Done              bool   // true if this is the last chunk
 }
 
 type InstallSnapshotReply struct {
@@ -288,6 +290,7 @@ func (rf *Raft) committedTicker() {
 		for rf.lastApplied < rf.commitIndex && rf.lastApplied < rf.realLastIndex() {
 			// 一直到commitIndex，但不能超过最后一个，因为不是每个server都存了commitIndex
 			rf.lastApplied++
+			// 这里不是snapshot，所以SnapshotValid需要是false
 			messages = append(messages, ApplyMsg{
 				CommandValid:  true,
 				Command:       rf.indexToEntry(rf.lastApplied).Data,
@@ -314,7 +317,6 @@ func (rf *Raft) StartElection() {
 	rf.electionTimer = time.Now()
 	// 保存要保存的东西,save Raft's persistent state to stable storage,
 	rf.persist()
-	// rf.mu.Lock()
 	voteNum := 1 // 统计票数，自己给自己的一票
 	// 遍历所有raft的server
 	for i := 0; i < len(rf.peers); i++ {
@@ -450,6 +452,15 @@ func (rf *Raft) leaderAppendEntries() {
 				rf.mu.Unlock()
 				return
 			}
+
+			// ---------------------判断是否需要发送snapshot----------------------------------
+			// server的日志小于snapshot状态，就需要发送自己的snapshot
+			if rf.nextIndex[server]-1 < rf.lastIncludedIndex {
+				go rf.LeaderSendSnapshot(server)
+				rf.mu.Unlock()
+				return
+			}
+
 			// ------------------------定义发送的RPC部分-------------------------------------
 			// 填充一个要发送的Entryargs
 			prevLogIndex, prevLogTerm := rf.realPreLog(server)
@@ -621,14 +632,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // 将states编码为字节数组，然后传给persister方便存储
 //
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	data := rf.persistData()
+	rf.persister.SaveRaftState(data)
+}
+
+// SaveStateAndSnapshot需要用到data
+func (rf *Raft) persistData() []byte {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -637,7 +646,7 @@ func (rf *Raft) persist() {
 	e.Encode(rf.lastIncludedIndex)
 	e.Encode(rf.lastIncludedTerm)
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	return data
 }
 
 //
@@ -674,31 +683,159 @@ func (rf *Raft) readPersist(data []byte) {
 
 // ---------------------------------------------2D-snapshot日志收缩-----------------------------------------------------
 //
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
 
 func (rf *Raft) LeaderSendSnapshot(server int) {
+	// ------------------------定义发送的RPC部分-------------------------------------
+	rf.mu.Lock()
+	args := InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
+		LastIncludedIndex: rf.lastIncludedIndex,
+		LastIncludedTerm:  rf.lastIncludedTerm,
+		Data:              rf.persister.ReadSnapshot(),
+	}
+	reply := InstallSnapshotReply{}
+	rf.mu.Unlock()
+
+	// -------------------------发送RPC并处理返回结果---------------------------------
+	res := rf.sendInstallSnapshot(server, &args, &reply)
+
+	if res {
+		rf.mu.Lock()
+		// 自身如果不是Candidate或者任期不符直接退出
+		if rf.currentState != Leader || args.Term != rf.currentTerm {
+			rf.mu.Unlock()
+			return
+		}
+		// 发现leader已经过期，更新状态并返回
+		if args.Term < reply.Term {
+			rf.currentState = Follower
+			rf.votedFor = NONE
+			rf.persist()
+			rf.electionTimer = time.Now()
+			rf.mu.Unlock()
+			return
+		}
+
+		rf.nextIndex[server] = args.LastIncludedIndex + 1
+		rf.matchIndex[server] = args.LastIncludedIndex
+		rf.mu.Unlock()
+		return
+	}
 
 }
 
 // InstallSnapshot 主函数
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	rf.mu.Lock()
+	// defer rf.mu.Unlock()
 
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
+	}
+
+	rf.currentTerm = args.Term // 可能需要更新一下rf的Term
+	reply.Term = rf.currentTerm
+
+	rf.currentState = Follower
+	rf.votedFor = NONE
+	rf.persist()
+	rf.electionTimer = time.Now()
+	// -----------------------------------------------------------------------
+	// 和Snapshot一样的功能，只不过这里是leader控制的，Snapshot是service控制的
+	// 自身的snapshot已经比传过来的要大了，就没有必要更新了
+	if args.LastIncludedIndex <= rf.lastIncludedIndex {
+		rf.mu.Unlock()
+		return
+	}
+
+	// 把index后到最后一个index对应的Entry装到新的[]log中
+	newLog := make([]Entry, 0)
+	newLog = append(newLog, Entry{})
+	index := args.LastIncludedIndex
+	for i := index + 1; i <= rf.realLastIndex(); i++ {
+		newLog = append(newLog, rf.indexToEntry(i))
+	}
+
+	// 更新
+	rf.lastIncludedIndex = args.LastIncludedIndex
+	rf.lastIncludedTerm = args.LastIncludedTerm
+	rf.log = newLog
+	if index > rf.commitIndex { // snapshot apply了也需要更新这两个参数
+		rf.commitIndex = index
+	}
+	if index > rf.lastApplied {
+		rf.lastApplied = index
+	}
+
+	rf.persister.SaveStateAndSnapshot(rf.persistData(), args.Data)
+	// 这里peer需要传递给Make()的applyCh一个ApplyMsg当peer意识到连续的日志被提交时
+	// 这个时候SnapshotValid需要时true，其他的传到chan中的msg需要时false
+	msg := ApplyMsg{
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.mu.Unlock()
+	rf.applyCh <- msg
 }
 
-// the service says it has created a snapshot that hasall info up to and including index.
-// 该服务说它已经创建了一个快照，其中包含所有信息，包括索引。
+// the service says it has created a snapshot that has all info up to and including index.
 // this means the service no longer needs the log through (and including) that index.
-// 服务不再需要通过（并包括）该索引的日志。
-// Raft should now trim its log as much as possible. Raft应该尽可能得修剪日志
+// Raft should now trim its log as much as possible.
+
+// snapshot其实就是service对rf调用的，使rf节点更新自身的快照信息
+// index代表是快照apply应用的index,而snapshot代表的是上层service传来的快照字节流，包括了Index之前的数据
+// 这个函数的目的是把安装到快照里的日志抛弃，并安装快照数据，同时更新快照下标，
+// 属于peers自身主动更新，与leader发送快照不冲突
 func (rf *Raft) Snapshot(index int, snapshot []byte) { // 也就是丢掉index之前的log日志
 	// Your code here (2D).
+	if rf.killed() {
+		return
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if index > rf.commitIndex || // 说明index还没有提交，不应该直接丢弃
+		index <= rf.lastIncludedIndex { // 说明index已经被丢弃了
+		return
+	}
+
+	// 把index后到最后一个index对应的Entry装到新的[]log中
+	newLog := make([]Entry, 0)
+	newLog = append(newLog, Entry{})
+	for i := index + 1; i <= rf.realLastIndex(); i++ {
+		newLog = append(newLog, rf.indexToEntry(i))
+	}
+
+	// 更新
+	if index == rf.realLastIndex()+1 {
+		rf.lastIncludedTerm = rf.realLastTerm()
+	} else { // 不是最后一个index
+		rf.lastIncludedTerm = rf.indexToTerm(index)
+	}
+	rf.lastIncludedIndex = index
+	rf.log = newLog
+	if index > rf.commitIndex { // snapshot apply了也需要更新这两个参数
+		rf.commitIndex = index
+	}
+	if index > rf.lastApplied {
+		rf.lastApplied = index
+	}
+
+	rf.persister.SaveStateAndSnapshot(rf.persistData(), snapshot)
+}
+
+//
+// A service wants to switch to snapshot.  Only do so if Raft hasn't
+// have more recent info since it communicate the snapshot on applyCh.
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	// 发送了快照，那么你发送的快照就要上传到applyCh，
+	// 而同时你的appendEntries也需要进行上传日志，可能会导致冲突。
+	// 只要在applied的时候做好同步，加上互斥锁，就可以避免这个问题，
+	// 所以因此实验室中也提到这个api已经是废弃的
+	return true
 }

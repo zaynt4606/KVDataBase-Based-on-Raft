@@ -1154,10 +1154,10 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 
 	cfg.begin(name)
 
-	cfg.one(rand.Int(), servers, true)
+	cfg.one(rand.Int(), servers, true) // start 一次
 	leader1 := cfg.checkOneLeader()
-
-	for i := 0; i < iters; i++ {
+	// fmt.Println("start once")
+	for i := 0; i < iters; i++ { // 流程循环iters遍
 		victim := (leader1 + 1) % servers
 		sender := leader1
 		if i%3 == 1 {
@@ -1174,8 +1174,9 @@ func snapcommon(t *testing.T, name string, disconnect bool, reliable bool, crash
 			cfg.one(rand.Int(), servers-1, true)
 		}
 
-		// perhaps send enough to get a snapshot
+		// perhaps send enough to get a snapshot ，快照间隔5-10之间
 		nn := (SnapShotInterval / 2) + (rand.Int() % SnapShotInterval)
+		// fmt.Println("get a snapshot")
 		for i := 0; i < nn; i++ {
 			cfg.rafts[sender].Start(rand.Int())
 		}
