@@ -147,7 +147,12 @@ func (rf *Raft) ticker() {
 
 // 通过不同的随机种子生成不同的过期时间
 func generateOverTime(server int64) int {
+	// Seed 使用提供的种子值将默认 Source 初始化为确定性状态。
+	// 如果未调用 Seed，则生成器的行为就像由 Seed(1) 播种一样。
+	// 除以 2³¹-1 时具有相同余数的种子值生成相同的伪随机序列。
+	// 与 Rand.Seed 方法不同，Seed 可以安全地同时使用。
 	rand.Seed(time.Now().Unix() + server)
+	// Intn返回参数n的[0,n)范围内伪随机数，MoreVoteTime = 100， MinVoteTime = 75
 	return rand.Intn(MoreVoteTime) + MinVoteTime
 }
 

@@ -39,7 +39,7 @@ import (
 // committed log entry.
 // 当每个 Raft peer 意识到连续的日志条目被提交时，
 // peer 应该通过传递给 Make() 的 applyCh 向同一服务器上的服务（或测试器）发送 ApplyMsg。
-// 将 CommandValid 设置为 true 以指示 ApplyMsg 包含新提交的日志条目。
+// 将 CommandValid 设置为 true 以指示 ApplyMsg 包含新提交的日志条目。chan用来同步信息的结构体
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
 // other uses.
@@ -66,7 +66,7 @@ const (
 const NONE = -1 // 可以指代节点的状态或者其他没有分配时候的值
 
 const (
-	// 定义随机生成投票过期时间范围:(MoreVoteTime+MinVoteTime~MinVoteTime)
+	// 定义随机生成投票过期时间范围:[MinVoteTime, MoreVoteTime+MinVoteTime)
 	MoreVoteTime = 100
 	MinVoteTime  = 75
 
@@ -98,7 +98,7 @@ type Raft struct {
 	electionTimer time.Time
 
 	// 2A
-	logIndex     int // server的最后一个index，不过用函数realLastIndex替代了
+	// logIndex     int // server的最后一个index，不过用函数realLastIndex替代了
 	currentState int
 	// currentLeader int
 	// 所有servers需要的持久化变量
@@ -115,7 +115,7 @@ type Raft struct {
 	// nextIndex -index of the next log entry to send to, initialized to leader last log index + 1)
 	// matchIndex -index of highest log entry known to be replicated on server
 	nextIndex  []int // 下一个appendEntry从哪个peer开始
-	matchIndex []int // 已知的某follower的log与leader的log最大匹配到第几个Index,已经apply
+	matchIndex []int // 已知的某follower的log与leader的log最大匹配到第几个Index,已经apply,过半server都match了，就可以跟新commitIndex了
 
 	//  the snapshot replaces all entries up through and including this index
 	lastIncludedIndex int // 日志最后applied对应的index
@@ -247,6 +247,8 @@ func (rf *Raft) electionTicker() {
 	for rf.killed() == false {
 		nowTime := time.Now()
 		// sleep 一个范围内的随机时间
+		// time.Sleep的参数对象需要是time.Duration，time.Millisecond就是一个time.Duration对象
+		// rf.me是随机种子，让每个server不一样所以可以用server的编号
 		time.Sleep(time.Duration(generateOverTime(int64(rf.me))) * time.Millisecond)
 		rf.mu.Lock()
 		//Timer如果小于sleep睡眠之前定义的时间，说明Timer没被更新为最新的时间，则发起选举
@@ -260,9 +262,10 @@ func (rf *Raft) electionTicker() {
 }
 
 // leader 定时发送更新heartbeat，其他surver接收并且更新日志
-// 2A 2B heartbeat，添加日志
+// 2A 2B 2C heartbeat，添加日志
 func (rf *Raft) appendTicker() {
 	for rf.killed() == false {
+		// 每35ms发送一个heartbeat，同时更新log
 		time.Sleep(HeartbeatSleep * time.Millisecond)
 		rf.mu.Lock()
 		if rf.currentState == Leader {
@@ -277,6 +280,7 @@ func (rf *Raft) appendTicker() {
 // 2B, goroutin不断检查是否可以发起新的提交
 func (rf *Raft) committedTicker() {
 	for rf.killed() == false {
+		// 每15ms检查一次是否可以提交
 		time.Sleep(AppliedSleep * time.Millisecond)
 		rf.mu.Lock()
 		// 已经更新过applied
@@ -295,7 +299,7 @@ func (rf *Raft) committedTicker() {
 				CommandValid:  true,
 				Command:       rf.indexToEntry(rf.lastApplied).Data,
 				CommandIndex:  rf.lastApplied,
-				SnapshotValid: false,
+				SnapshotValid: false, // 这里的提交不是snapshot
 			})
 		}
 		rf.mu.Unlock()
@@ -310,6 +314,7 @@ func (rf *Raft) committedTicker() {
 // ----------------------------------------2A-leader选举-------------------------------------------
 //
 func (rf *Raft) StartElection() {
+	// ------------------------------------更新一下Candidate的状态-------------------------------
 	// 自己发起选取，改变状态， 论文中server成为Candidates的要求
 	rf.currentState = Candidate
 	rf.votedFor = rf.me
@@ -317,6 +322,9 @@ func (rf *Raft) StartElection() {
 	rf.electionTimer = time.Now()
 	// 保存要保存的东西,save Raft's persistent state to stable storage,
 	rf.persist()
+	// fmt.Println("[test]:Raft", rf.me, "starts a election")
+
+	// ------------------------------------统计每个server的投票情况-----------------------------------------
 	voteNum := 1 // 统计票数，自己给自己的一票
 	// 遍历所有raft的server
 	for i := 0; i < len(rf.peers); i++ {
@@ -325,6 +333,8 @@ func (rf *Raft) StartElection() {
 		}
 		// 开启协程进行竞选
 		go func(server int) {
+
+			// -------------------定义发送和接收的PRC-----------------
 			rf.mu.Lock()             // 创建发送和接收的内容需要上锁
 			args := RequestVoteArgs{ // 投票要发的args
 				rf.currentTerm,
@@ -335,17 +345,18 @@ func (rf *Raft) StartElection() {
 			reply := RequestVoteReply{} // 投完票接收的reply
 			rf.mu.Unlock()
 			// 发送并获得reply，res接到是否发送成功
-			// res := rf.peers[server].Call("Raft.RequestVote", &args, &reply)
-			res := rf.sendRequestVote(server, &args, &reply) // 下面的RequestVote在这里使用
-			// rf.electionTimer = time.Now()                    //给别的peer投票的时候也更新，函数里面其实已经更新了
+			// ----------------发送并根据返回RPC更新状态-----------------
+			res := rf.sendRequestVote(server, &args, &reply) // raft向server请求选票回复
 			if res {
 				rf.mu.Lock()
-				// 自身如果不是Candidate或者任期不符直接退出
+				defer rf.mu.Unlock()
+				// 自身如果不是Candidate或者任期不符直接退出, args.Term小可能是因为发出args后rf更新了，这样args就无效了
+				// 更新可能是已经产生了新的leader，或者旧的leader重新发过来heartbeat，无论哪种此时rf.currentState也会成为Follower
 				if rf.currentState != Candidate || args.Term < rf.currentTerm {
-					rf.mu.Unlock()
 					return
 				}
-				// 返回任期和当前任期不符,重置状态后退出
+
+				// 返回任期和当前任期不符,重置状态后退出,reply有更新的term,同样取消选举并且更新当下rf的状态
 				if args.Term < reply.Term {
 					if rf.currentTerm < reply.Term {
 						rf.currentTerm = reply.Term
@@ -353,20 +364,20 @@ func (rf *Raft) StartElection() {
 					rf.currentState = Follower
 					rf.votedFor = NONE
 					rf.persist()
-					rf.mu.Unlock()
 					return
 				}
+
+				// 收到选举票，统计票数
 				if reply.VoteGranted && args.Term == rf.currentTerm {
 					voteNum++ // 统计票数
 					// 票数过半
 					if voteNum > len(rf.peers)/2 {
 						// 修改状态
 						rf.currentState = Leader
-						// rf.currentLeader = rf.me
 						rf.votedFor = NONE
 						rf.persist()
 
-						// 更新leader管控信息
+						// 更新leader管控的全组信息nextIndex和matchIndex
 						rf.nextIndex = make([]int, len(rf.peers))
 						for i := 0; i < len(rf.peers); i++ {
 							rf.nextIndex[i] = rf.realLastIndex() + 1
@@ -375,12 +386,11 @@ func (rf *Raft) StartElection() {
 						rf.matchIndex[rf.me] = rf.realLastIndex()
 
 						rf.electionTimer = time.Now()
-						rf.mu.Unlock()
+						// fmt.Println("[test]:Raft", rf.me, "elected successfully")
 						return
 					}
 
 				}
-				rf.mu.Unlock()
 				return
 			} // 已接受
 		}(i) // 实参赋给server
@@ -390,7 +400,7 @@ func (rf *Raft) StartElection() {
 
 //
 // example RequestVote RPC handler. 论文中的RequesVote RPC
-// 在startElection中发送投票使用到
+// 在startElection中发送投票使用到, 这里的rf并不是上面的Candidate，是Candidate发送给其他server的rf
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
@@ -406,7 +416,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 论文all servers 第二个要求
-	if args.Term > rf.currentTerm { // 任期大于当前任期，当前任期迟了，重置rf状态
+	if args.Term > rf.currentTerm { // 任期大于当前任期，当前任期迟了，更新当前rf状态
 		rf.currentTerm = args.Term
 		rf.currentState = Follower
 		rf.votedFor = NONE
@@ -414,6 +424,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 论文RequesVote RPC第二个要求之一：votedFor is null or candidateId才可以返回true
+	// 投票先到先得，已经有人拿走了票
 	if rf.votedFor != NONE && rf.votedFor != args.CandidateID {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -421,15 +432,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// 论文RequesVote RPC第二个要求之一：candidate’s log is at least as up-to-date as receiver’s log
+	// 也就是args的log要比rf的log更新
 	if !rf.UpToDate(args.LastLogIndex, args.LastLogTerm) {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
 	}
 
-	// 更新参数后返回true
+	// 没啥问题可以投票给Candidate
 	reply.VoteGranted = true
-	reply.Term = rf.currentTerm
+	reply.Term = rf.currentTerm // 没问题的情况下，reply.Term就是args.Term
 	rf.votedFor = args.CandidateID
 	rf.currentTerm = args.Term
 	rf.electionTimer = time.Now()
@@ -447,14 +459,14 @@ func (rf *Raft) leaderAppendEntries() {
 		}
 		// 每个server开启协程
 		go func(server int) {
-			rf.mu.Lock()
-			if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
-				rf.mu.Unlock()
-				return
-			}
+			rf.mu.Lock() // 这个Lock是用来单独创建heartbeatRPC的
+			// if rf.currentState != Leader { // 之前判断过才进来，这里其实不用判断
+			// 	rf.mu.Unlock()
+			// 	return
+			// }
 
 			// ---------------------判断是否需要发送snapshot----------------------------------
-			// server的日志小于snapshot状态，就需要发送自己的snapshot
+			// server的日志小于leader的snapshot状态，就需要发送leader的snapshot
 			if rf.nextIndex[server]-1 < rf.lastIncludedIndex {
 				go rf.LeaderSendSnapshot(server)
 				rf.mu.Unlock()
@@ -515,9 +527,10 @@ func (rf *Raft) leaderAppendEntries() {
 				}
 
 				if reply.Success {
+					// 更新commitIndex，[]matchIndex，[]nextIndex
 					// 这几个参数只有leader才能修改
-					rf.commitIndex = rf.lastIncludedIndex // commitIde最小的可能，下面还会更新
-					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+					rf.commitIndex = rf.lastIncludedIndex                         // commitIde最小的可能，下面还会更新
+					rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries) // match比较激进， commit比较稳重
 					rf.nextIndex[server] = rf.matchIndex[server] + 1
 
 					// 一个个index遍历然后统计同步的peers数目，判断要不要提交这个
@@ -566,14 +579,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Success = true // 没什么问题的话reply这么设置
 	reply.Term = args.Term
 	reply.NextIndex = -1
-
-	// 这里插入一个更新server状态的heartbeat的过程,要在上面那个判断之下
+	// -----------------------------heartbeat--------------------------------------
+	// 这里插入一个更新server状态的heartbeat的过程,要在上面那个的Term更新之后
 	rf.currentTerm = args.Term // 假如有更新的term需要更新
 	rf.currentState = Follower
 	rf.votedFor = NONE
 	rf.persist()
 	rf.electionTimer = time.Now() // heartbeat来更新选举时间
 
+	// ----------------------------------------------------------------------------
 	// Reply false if log doesn’t contain an entry at prevLogIndex
 	// whose term matches prevLogTerm (§5.3)
 	// 自身的index比发送过来的prev还大，返回冲突的下标+1
@@ -604,7 +618,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		return
 	}
-	// 进行日志的截取
+	// server的log补齐，从匹配的[0, args.PrevLogIndex+1-rf.lastIncludedIndex]再加上之后的args.Rntri
 	rf.log = append(rf.log[:args.PrevLogIndex+1-rf.lastIncludedIndex], args.Entries...)
 	rf.persist()
 
@@ -614,7 +628,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.realLastIndex())
 	}
-
 	// 没啥问题正常返回
 	// reply.Success = true
 	// reply.Term = args.Term
@@ -687,12 +700,12 @@ func (rf *Raft) readPersist(data []byte) {
 func (rf *Raft) LeaderSendSnapshot(server int) {
 	// ------------------------定义发送的RPC部分-------------------------------------
 	rf.mu.Lock()
-	args := InstallSnapshotArgs{
+	args := InstallSnapshotArgs{ // 这部分是发送给server更新的
 		Term:              rf.currentTerm,
 		LeaderId:          rf.me,
 		LastIncludedIndex: rf.lastIncludedIndex,
 		LastIncludedTerm:  rf.lastIncludedTerm,
-		Data:              rf.persister.ReadSnapshot(),
+		Data:              rf.persister.ReadSnapshot(), // 主要用来persist的就是这部分字节流化的数据
 	}
 	reply := InstallSnapshotReply{}
 	rf.mu.Unlock()
@@ -702,7 +715,7 @@ func (rf *Raft) LeaderSendSnapshot(server int) {
 
 	if res {
 		rf.mu.Lock()
-		// 自身如果不是Candidate或者任期不符直接退出
+		// 自身如果不是leader或者任期不符直接退出
 		if rf.currentState != Leader || args.Term != rf.currentTerm {
 			rf.mu.Unlock()
 			return
@@ -717,6 +730,7 @@ func (rf *Raft) LeaderSendSnapshot(server int) {
 			return
 		}
 
+		//
 		rf.nextIndex[server] = args.LastIncludedIndex + 1
 		rf.matchIndex[server] = args.LastIncludedIndex
 		rf.mu.Unlock()
@@ -725,21 +739,21 @@ func (rf *Raft) LeaderSendSnapshot(server int) {
 
 }
 
-// InstallSnapshot 主函数
+// InstallSnapshot 主函数, 这里的rf是上面的server
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	defer rf.mu.Unlock()
 
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
-		rf.mu.Unlock()
+		// rf.mu.Unlock()
 		return
 	}
 
 	rf.currentTerm = args.Term // 可能需要更新一下rf的Term
 	reply.Term = rf.currentTerm
 
-	rf.currentState = Follower
+	rf.currentState = Follower // snapshotRPC也可以当作heartbeat
 	rf.votedFor = NONE
 	rf.persist()
 	rf.electionTimer = time.Now()
@@ -747,7 +761,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// 和Snapshot一样的功能，只不过这里是leader控制的，Snapshot是service控制的
 	// 自身的snapshot已经比传过来的要大了，就没有必要更新了
 	if args.LastIncludedIndex <= rf.lastIncludedIndex {
-		rf.mu.Unlock()
+		// rf.mu.Unlock()
 		return
 	}
 
@@ -779,7 +793,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
-	rf.mu.Unlock()
+	// rf.mu.Unlock() // 这里先解锁再传入chan可以快一些
 	rf.applyCh <- msg
 }
 
