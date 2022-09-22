@@ -249,6 +249,7 @@ func (rf *Raft) electionTicker() {
 		// sleep 一个范围内的随机时间
 		// time.Sleep的参数对象需要是time.Duration，time.Millisecond就是一个time.Duration对象
 		// rf.me是随机种子，让每个server不一样所以可以用server的编号
+		// 75~175ms之间，大于heartbeat和rpc往返时间,也就是两倍的heartbeat，heartbeat是35ms
 		time.Sleep(time.Duration(generateOverTime(int64(rf.me))) * time.Millisecond)
 		rf.mu.Lock()
 		//Timer如果小于sleep睡眠之前定义的时间，说明Timer没被更新为最新的时间，则发起选举
@@ -555,6 +556,7 @@ func (rf *Raft) leaderAppendEntries() {
 					}
 				} else {
 					if reply.NextIndex != -1 { // 有冲突，任期不同是-1
+						// 对应的server的nextindex应该同步到返回的需要重置的值
 						rf.nextIndex[server] = reply.NextIndex
 					}
 				}
@@ -593,13 +595,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 自身的index比发送过来的prev还大，返回冲突的下标+1
 	if rf.lastIncludedIndex > args.PrevLogIndex {
 		reply.Success = false
-		reply.NextIndex = rf.realLastIndex() + 1
+		reply.NextIndex = rf.realLastIndex() + 1 // reallastindex的下一个
 		return
 	}
 	// 自身有缺失
-	if rf.realLastIndex() < args.PrevLogIndex {
+	if rf.realLastIndex() < args.PrevLogIndex { // 自身index太小，说明有缺失，返回自己最后一个前一个，让leader发这个作为PreLogIndex来对比
 		reply.Success = false
-		reply.NextIndex = rf.realLastIndex()
+		reply.NextIndex = rf.realLastIndex() // 回退一个
 		return
 	}
 
@@ -607,6 +609,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// If an existing entry conflicts with a new one
 	// (same index but different terms),
 	// delete the existing entry and all that follow it (§5.3)
+	// args的prelogindex对应的term和server同位置的term不一样，
+	// 需要将nextindex回退到对应reallastindex对应的term和当前不一样的那一个
 	if args.PrevLogTerm != rf.indexToTerm(args.PrevLogIndex) {
 		reply.Success = false
 		tempTerm := rf.indexToTerm(args.PrevLogIndex)
