@@ -52,6 +52,10 @@ func (ps *Persister) ReadRaftState() []byte {
 	return clone(ps.raftstate)
 }
 
+func (raft *Raft) GetRaftState() int {
+	return raft.persister.RaftStateSize()
+}
+
 // persister保存的state数据的长度，[]byte
 func (ps *Persister) RaftStateSize() int {
 	ps.mu.Lock()
