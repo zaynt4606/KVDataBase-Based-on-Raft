@@ -1,13 +1,10 @@
 package kvraft
 
 import (
+	"6.824/labrpc"
 	"crypto/rand"
 	"math/big"
 	mathrand "math/rand"
-
-	// "time"
-
-	"6.824/labrpc"
 )
 
 // client发送给raft服务器的RPC，(内容就是put，append，get的指令)
@@ -15,7 +12,7 @@ type Clerk struct {
 	servers []*labrpc.ClientEnd // 每个server对应一个raft
 	// You will have to modify this struct.
 	leaderId int   // 返回的server告诉client哪个server是leader
-	clientId int64 // client自己是哪个client
+	clientId int64 // client自己是哪个client, uniquely identify client
 	seqId    int   // paper中说到的防止leader发生crash造成的重复发送op，给op编号排序
 
 }
