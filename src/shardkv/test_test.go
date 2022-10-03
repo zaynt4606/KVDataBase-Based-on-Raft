@@ -1,18 +1,22 @@
 package shardkv
 
-import "6.824/porcupine"
-import "6.824/models"
-import "testing"
-import "strconv"
-import "time"
-import "fmt"
-import "sync/atomic"
-import "sync"
-import "math/rand"
-import "io/ioutil"
+import (
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"6.824/models"
+	"6.824/porcupine"
+)
 
 const linearizabilityCheckTimeout = 1 * time.Second
 
+// check key对应的value是不是传入的value
 func check(t *testing.T, ck *Clerk, key string, value string) {
 	v := ck.Get(key)
 	if v != value {
@@ -26,7 +30,7 @@ func check(t *testing.T, ck *Clerk, key string, value string) {
 func TestStaticShards(t *testing.T) {
 	fmt.Printf("Test: static shards ...\n")
 
-	cfg := make_config(t, 3, false, -1)
+	cfg := make_config(t, 3, false, -1) // 3个server
 	defer cfg.cleanup()
 
 	ck := cfg.makeClient()

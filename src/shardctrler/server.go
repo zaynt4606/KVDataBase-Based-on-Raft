@@ -463,8 +463,8 @@ func (sc *ShardCtrler) seqNotUsed(clientId int64, seqInd int) bool {
 
 // 判断i是不是需要多映射一个余数remainder
 // 没有整除多出来的部分从前往后一个个添加
-func keepRemainder(length int, remainder int, i int) bool {
-	if i < length-remainder {
+func keepRemainder(remainder int, i int) bool {
+	if i < remainder {
 		return true
 	} else {
 		return false
@@ -502,8 +502,8 @@ func (sc *ShardCtrler) balanceShards(gidShardNums map[int]int, oldShards [NShard
 
 	// 第一遍遍历sortedGIds找到超过ave的gid并把其相应的shards都映射到0
 	for i := 0; i < gidNum; i++ {
-		shardsNum := ave                          // i对应的gid应该存的shards数目
-		if !keepRemainder(gidNum, remainder, i) { // 需要多存一个余数就+1
+		shardsNum := ave                 // i对应的gid应该存的shards数目
+		if keepRemainder(remainder, i) { // 需要多存一个余数就+1
 			shardsNum++
 		}
 		// 超了
@@ -526,8 +526,8 @@ func (sc *ShardCtrler) balanceShards(gidShardNums map[int]int, oldShards [NShard
 
 	// 第二遍遍历,把不够的gid填满
 	for i := 0; i < gidNum; i++ {
-		shardsNum := ave                          // i对应的gid应该存的shards数目
-		if !keepRemainder(gidNum, remainder, i) { // 需要多存一个余数就+1
+		shardsNum := ave                 // i对应的gid应该存的shards数目
+		if keepRemainder(remainder, i) { // 需要多存一个余数就+1
 			shardsNum++
 		}
 		// 不够的
