@@ -8,15 +8,17 @@ import (
 )
 
 // import "time"
-
+// groups是gid的切片
 func check(t *testing.T, groups []int, ck *Clerk) {
 	c := ck.Query(-1)
+	// fmt.Println("[test] len(groups) = ", len(groups))
 	if len(c.Groups) != len(groups) {
 		t.Fatalf("wanted %v groups, got %v", len(groups), len(c.Groups))
 	}
 
 	// are the groups as expected?
 	for _, g := range groups {
+		// fmt.Println("[test] g = ", g)
 		_, ok := c.Groups[g]
 		if ok != true {
 			t.Fatalf("missing group %v", g)
@@ -25,9 +27,12 @@ func check(t *testing.T, groups []int, ck *Clerk) {
 
 	// any un-allocated shards?
 	if len(groups) > 0 {
+		// fmt.Println("[test] len(groups) = ", len(groups))
 		for s, g := range c.Shards {
+			// fmt.Println("[test] s = ", s, ", g = ", g)
 			_, ok := c.Groups[g]
 			if ok == false {
+				fmt.Println("[test] shard:", s, "gid:", g, "group cannt find gid")
 				t.Fatalf("shard %v -> invalid group %v", s, g)
 			}
 		}
@@ -61,7 +66,7 @@ func check_same_config(t *testing.T, c1 Config, c2 Config) {
 		t.Fatalf("Shards wrong")
 	}
 	if len(c1.Groups) != len(c2.Groups) {
-		t.Fatalf("number of Groups is wrong")
+		t.Fatalf("number of Groups is wrong, len(c1) = %v ,len(c2) = %v", len(c1.Groups), len(c2.Groups))
 	}
 	for gid, sa := range c1.Groups {
 		sa1, ok := c2.Groups[gid]
@@ -87,19 +92,22 @@ func TestBasic(t *testing.T) {
 
 	fmt.Printf("Test: Basic leave/join ...\n")
 
-	cfa := make([]Config, 6)
+	cfa := make([]Config, 6) // Config的切片
 	cfa[0] = ck.Query(-1)
 
-	check(t, []int{}, ck)
-
+	check(t, []int{}, ck) // groups是0,啥也没有
+	// fmt.Println("[check pass]")
 	var gid1 int = 1
+	// 使用Join
 	ck.Join(map[int][]string{gid1: []string{"x", "y", "z"}})
 	check(t, []int{gid1}, ck)
+	// fmt.Println("[check pass]")
 	cfa[1] = ck.Query(-1)
 
 	var gid2 int = 2
 	ck.Join(map[int][]string{gid2: []string{"a", "b", "c"}})
 	check(t, []int{gid1, gid2}, ck)
+	// fmt.Println("[check pass]")
 	cfa[2] = ck.Query(-1)
 
 	cfx := ck.Query(-1)
@@ -111,25 +119,29 @@ func TestBasic(t *testing.T) {
 	if len(sa2) != 3 || sa2[0] != "a" || sa2[1] != "b" || sa2[2] != "c" {
 		t.Fatalf("wrong servers for gid %v: %v\n", gid2, sa2)
 	}
-
+	// fmt.Println("[Leave]")
 	ck.Leave([]int{gid1})
 	check(t, []int{gid2}, ck)
+	// fmt.Println("[check pass]")
 	cfa[4] = ck.Query(-1)
 
 	ck.Leave([]int{gid2})
 	cfa[5] = ck.Query(-1)
 
 	fmt.Printf("  ... Passed\n")
-
+	// -----------------------------------------------------------------------------
 	fmt.Printf("Test: Historical queries ...\n")
 
 	for s := 0; s < nservers; s++ {
 		cfg.ShutdownServer(s)
 		for i := 0; i < len(cfa); i++ {
+			fmt.Println("[test queries] i = ", i)
 			c := ck.Query(cfa[i].Num)
+			// 应该是同一个config
 			check_same_config(t, c, cfa[i])
+			fmt.Println("[same config]")
 		}
-		cfg.StartServer(s)
+		cfg.StartServer(s) // 重启
 		cfg.ConnectAll()
 	}
 
