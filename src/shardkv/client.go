@@ -62,9 +62,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
-	ck.config = ck.sm.Query((-1)) // query -1 就是返回最后一个config
-	ck.clientId = nrand()         // 随机生成clientId
+	ck.clientId = nrand() // 随机生成clientId
 	ck.seqId = 0
+	ck.config = ck.sm.Query((-1)) // query -1 就是返回最后一个config
 	return ck
 }
 
@@ -76,9 +76,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 //
 func (ck *Clerk) Get(key string) string {
 	ck.seqId++
-	args := GetArgs{Key: key, ClientId: ck.clientId, RequestId: ck.seqId}
-
 	for {
+		args := GetArgs{Key: key, ClientId: ck.clientId, RequestId: ck.seqId}
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
@@ -109,15 +108,14 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	ck.seqId++
-	args := PutAppendArgs{
-		Key:       key,
-		Value:     value,
-		Op:        op,
-		ClientId:  ck.clientId,
-		RequestId: ck.seqId,
-	}
-
 	for {
+		args := PutAppendArgs{
+			Key:       key,
+			Value:     value,
+			Op:        Operation(op),
+			ClientId:  ck.clientId,
+			RequestId: ck.seqId,
+		}
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
